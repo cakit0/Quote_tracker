@@ -1,0 +1,7 @@
+# Runtime dependencies for the HAWE Quote Tracker desktop app.
+# Tkinter is part of the Python standard library on Windows (python.org build)
+# and does not need to be listed here.
+
+pdfplumber>=0.11        # PDF table / text extraction
+openpyxl>=3.1           # Excel (.xlsx) reading and export
+tkinterdnd2>=0.4        # native drag-and-drop onto the window (optional but recommended)
