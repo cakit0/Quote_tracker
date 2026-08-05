@@ -159,10 +159,45 @@ def test_real_quote_optional():
     check(not q.warnings, f"no parse warnings (got {q.warnings})")
 
 
+def test_real_quotes_supplier_and_part():
+    """Supplier + part-number extraction across the varied real PDF formats.
+
+    These files carry confidential pricing and are not committed, so each check
+    is skipped when its file is absent.  Expected values assert the supplier
+    name and the first part number only (prices are reviewed by the user).
+    """
+    print("\n[real quotes: supplier + part number]")
+    cases = {
+        "real_q54446.pdf":  ("M&W", "26-1114"),
+        "real_q54497.pdf":  ("M&W", "26-20027-CA"),
+        "real_6274.pdf":    ("Custom Hydraulics Inc.", "25-20045-US"),
+        "real_6284.pdf":    ("Custom Hydraulics Inc.", "EC-000072-US"),
+        "real_nd.pdf":      ("NEW DIMENSIONS PRECISION MACHINING, INC.", "3253368"),
+        "real_q19054.pdf":  ("LBG Machine, Inc.", "MF19-0195-R0"),
+        "real_b26028.pdf":  ("Daman", None),          # part not reliably in text
+        "real_yoye.pdf":    ("NINGBO YOYE HYDRAULICS CO.,LTD", "25-20038-US"),
+    }
+    for fname, (exp_vendor, exp_part) in cases.items():
+        path = os.path.join(SAMPLES, fname)
+        if not os.path.exists(path):
+            print(f"  SKIP  {fname} not present")
+            continue
+        q = parse_file(path)
+        check(q.vendor == exp_vendor,
+              f"{fname}: supplier {exp_vendor!r} (got {q.vendor!r})")
+        if exp_part is not None:
+            got = q.lines[0].part_number if q.lines else None
+            check(got == exp_part, f"{fname}: part {exp_part!r} (got {got!r})")
+        # HAWE (the customer) must never be recorded as the supplier.
+        check("hawe" not in (q.vendor or "").lower(),
+              f"{fname}: customer not used as supplier")
+
+
 if __name__ == "__main__":
     test_number_parser()
     test_parsers_and_db()
     test_real_quote_optional()
+    test_real_quotes_supplier_and_part()
     print("\n" + "=" * 50)
     if failures:
         print(f"{len(failures)} FAILURE(S)")

@@ -354,72 +354,232 @@ def parse_csv(path: str) -> ParsedQuote:
 # ── PDF text extraction (for quotes whose prices live in the text, not a
 #    ruled table - very common for machine-shop / manifold suppliers) ────────
 
-def _extract_price_block(lines: List[str]) -> List[PriceBreak]:
-    """Read a "Quantity | Price/Unit | Extended" style block from PDF text.
+# In this procurement workflow HAWE is always the buyer, so a line naming HAWE
+# is the customer and must never be taken as the supplier.
+CUSTOMER_HINTS = ("hawe",)
 
-    Anchors on a header line that mentions a quantity *and* a price word, then
-    reads the contiguous rows beneath it: first number on the row is the
-    quantity, the first currency amount is the unit price.  Quantities are read
-    straight from the document - never assumed.
+# A line that looks like a company's legal name (used to find the supplier).
+_COMPANY_SUFFIX = re.compile(
+    r"\b(inc\.?|incorporated|l\.?l\.?c\.?|ltd\.?|limited|co\.,?\s*ltd\.?|"
+    r"company|corp\.?|corporation|gmbh|manufacturing|machining|hydraulics|"
+    r"machine|industries|products|mfg\.?|technologies|engineering|precision)\b",
+    re.I)
+_COMPANY_SKIP = re.compile(
+    r"^\s*(to\b|attn|bill\s*to|ship\s*to|sold\s*to|quote|quotation|date|"
+    r"customer|company\s*name|account|prepared|page|tel|fax|phone|e-?mail|"
+    r"web|add\b|address|terms|f\.?o\.?b|salesman|sales\s*person|remit|p\.?o\.?)",
+    re.I)
+
+# HAWE's own drawing/part numbers, e.g. 25-20038-US, 17-30071B-CN, EC-000072-US.
+# These are the ideal key for the study table: the SAME part quoted by different
+# suppliers gets the SAME number, so rows line up.  A 2-char alphanumeric prefix
+# and a US/CN/CA/MX region suffix keep the pattern specific.
+_HAWE_PART_RE = re.compile(r"\b[A-Z0-9]{2}-\d{4,6}[A-Za-z]?-(?:US|CN|CA|MX)\b")
+
+# Material grades that must never be mistaken for a quantity.
+_MATERIAL_GRADES = {6061, 7075, 6063, 5052, 2024, 1045, 4140, 4340,
+                    304, 316, 303, 1018, 1215, 8620}
+
+_PRICE_WORD = re.compile(
+    r"(price|cost|unit|rate|each|amount|net|per\s*(?:pc|unit|part|piece|ea)|"
+    r"/\s*(?:pc|ea|unit)|\$|usd|eur|gbp)", re.I)
+_STOP_LINE = re.compile(
+    r"^\s*(remarks?|terms|notes?|thank you|conditions?|payment|approval|"
+    r"inventory|total|subtotal|www\.|page\b|[*•])", re.I)
+
+
+def _extract_price_block(lines: List[str]) -> List[PriceBreak]:
+    """Read a "Quantity | Price/Unit | ..." style block from PDF text.
+
+    Anchors on a header line naming a quantity *and* a price, then reads the
+    rows beneath it: the leading number is the quantity (the low end of a range
+    like "2 - 3"), the first currency amount is the unit price.  Quantities are
+    read from the document - never assumed.  Non-price lines interleaved in the
+    block (notes, a stray "Material = ..." line) are skipped, not treated as the
+    end of the table.
     """
     header_i = None
     for i, l in enumerate(lines):
-        ll = l.lower()
-        if (re.search(r"\b(qty|quantity)\b", ll)
-                and re.search(r"(price|cost|unit|rate|each|amount)", ll)):
+        if re.search(r"\b(qty|quantity)\b", l, re.I) and _PRICE_WORD.search(l):
             header_i = i
             break
     if header_i is None:
         return []
 
-    breaks: List[PriceBreak] = []
+    dedup: dict = {}
+    seen = False
+    blanks = 0
     for l in lines[header_i + 1:]:
-        m = re.match(r"\s*(\d[\d,]*)\b(.*)", l)
-        if not m:
-            if breaks:          # block has ended
+        if not l.strip():
+            blanks += 1
+            if seen and blanks >= 2:
                 break
             continue
+        if seen and _STOP_LINE.match(l):
+            break
+        m = re.match(r"\s*(\d[\d,]*)", l)
+        if not m:
+            continue
+        rest = l[m.end():]
+        # A digit glued to a dash is part of a code (25-20038-US, 6061-T651),
+        # not a quantity.
+        if rest[:1] == "-":
+            continue
         qty = parse_number(m.group(1))
-        rest = m.group(2)
+        if qty is None or qty <= 0 or qty > 1_000_000 or int(qty) in _MATERIAL_GRADES:
+            continue
         amounts = re.findall(r"[\$€£]\s*([\d,]+(?:\.\d+)?)", rest)
         if not amounts:                                   # currency-less table
-            amounts = re.findall(r"(?<![\d.])([\d,]+\.\d{2})\b", rest)
-        if qty and qty > 0 and amounts:
-            price = parse_number(amounts[0])
-            if price and price > 0:
-                breaks.append(PriceBreak(quantity=qty, unit_price=price))
-        elif breaks:
+            amounts = re.findall(r"(?<![\d.])([\d,]+\.\d{2})(?!\d)", rest)
+        if not amounts:
+            continue
+        price = parse_number(amounts[0])
+        if price and price > 0 and price != qty:
+            seen = True
+            if qty not in dedup or price < dedup[qty]:
+                dedup[qty] = price
+    return [PriceBreak(q, p) for q, p in sorted(dedup.items())]
+
+
+def _looks_like_company(line: str) -> bool:
+    l = line.strip()
+    if not (2 <= len(l) <= 55):
+        return False
+    low = l.lower()
+    if any(h in low for h in CUSTOMER_HINTS):
+        return False
+    if _COMPANY_SKIP.match(l):
+        return False
+    if sum(c.isalpha() for c in l) < 3:
+        return False
+    return bool(_COMPANY_SUFFIX.search(l))
+
+
+def _website_domain(text: str) -> str:
+    for m in re.finditer(
+            r"(?:https?://)?(?:www\.)?([A-Za-z0-9][A-Za-z0-9-]{1,40})"
+            r"\.(?:com|net|org|us|cn|co|io|biz)\b", text):
+        label = m.group(1)
+        low = label.lower()
+        if any(h in low for h in CUSTOMER_HINTS):
+            continue
+        if low in ("gmail", "yahoo", "outlook", "hotmail", "aol"):
+            continue
+        return label
+    return ""
+
+
+def _extract_supplier(lines: List[str], text: str, part_prefix: str = "") -> str:
+    """Best-effort supplier name.
+
+    Order: the letterhead company line (never the customer) → a clean
+    "<X> Part Number:" prefix (e.g. M&W) → the website domain (e.g. daman.com →
+    Daman) → any company-looking line elsewhere.  The domain outranks a stray
+    company line so a supplier's own sub-brand mentioned mid-document (e.g.
+    "AMVP (…Products)") doesn't beat the real name.
+    """
+    for l in lines[:8]:
+        if _looks_like_company(l):
+            return l.strip().rstrip(",").strip()
+    if part_prefix:
+        return part_prefix
+    dom = _website_domain(text)
+    if dom:
+        return dom[:1].upper() + dom[1:]
+    for l in lines:
+        if _looks_like_company(l):
+            return l.strip().rstrip(",").strip()
+    return ""
+
+
+def _extract_part_numbers(text: str) -> List[str]:
+    """Distinct part numbers, HAWE drawing numbers first, else a labelled one."""
+    parts: List[str] = []
+    for m in _HAWE_PART_RE.finditer(text):
+        if m.group(0) not in parts:
+            parts.append(m.group(0))
+    if parts:
+        return parts
+    m = re.search(r"part\s*(?:number|no\.?|num|#)\s*[:#]?\s*"
+                  r"([A-Za-z0-9][\w\-./]*\d[\w\-./]*)", text, re.I)
+    if m:
+        val = m.group(1).strip().rstrip(".")
+        if not re.match(r"^\d{1,2}-\d{1,2}$", val):   # not a tiny range like 7-8
+            return [val]
+    return []
+
+
+def _part_from_filename(path: str) -> str:
+    # Underscores are word characters, which would defeat the \b anchors below,
+    # so treat them as separators first ("2520015US_Rev" -> "2520015US Rev").
+    stem = re.sub(r"_+", " ", Path(path).stem)
+    m = _HAWE_PART_RE.search(stem)
+    if m:
+        return m.group(0)
+    # A glued HAWE number in the filename, e.g. "2520015US" -> "25-20015-US".
+    m = re.search(r"\b(\d{2})(\d{4,5})([A-Za-z]?)(US|CN|CA|MX)\b", stem, re.I)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}{m.group(3)}-{m.group(4).upper()}"
+    m = re.search(r"\b([A-Za-z]{0,3}-?\d{4,6}[A-Za-z]?)\b", stem)
+    return m.group(1) if m else ""
+
+
+def _supplier_from_filename(path: str) -> str:
+    """Pull a supplier name out of the filename tokens, e.g.
+    '2520015US_Rev_A_Quote_Lavigne_Manufacturing' -> 'Lavigne Manufacturing'."""
+    tokens = re.split(r"[ _\-]+", Path(path).stem)
+    for i, tok in enumerate(tokens):
+        if _COMPANY_SUFFIX.fullmatch(tok) or _COMPANY_SUFFIX.match(tok + " "):
+            name = " ".join(tokens[max(0, i - 1):i + 1])
+            if name and "hawe" not in name.lower():
+                return name
+    return ""
+
+
+def _first_item_label(lines: List[str]) -> str:
+    """The product/part text from the first priced row of an item table, e.g.
+    '1  XTREME SWAY MANIFOLD  1  $372.20' -> 'XTREME SWAY MANIFOLD'."""
+    for i, l in enumerate(lines):
+        if re.search(r"\b(qty|quantity)\b", l, re.I) and _PRICE_WORD.search(l):
+            for l2 in lines[i + 1:i + 6]:
+                m = re.match(r"\s*\d+\s+(.+?)\s+[\d,]+\s+[\$€£]", l2)
+                if m:
+                    label = m.group(1).strip()
+                    if len(label) >= 3 and re.search(r"[A-Za-z]", label):
+                        return label
             break
-    return breaks
+    return ""
 
 
 def _extract_labeled_fields(text: str, lines: List[str]) -> dict:
-    """Pull part number / description / material / lead time / vendor hint from
-    the labelled header block of a single-part quote."""
-    out = {"part_number": "", "description": "", "material": "",
-           "lead_time": "", "vendor": ""}
+    """Pull description / material / lead time / vendor-prefix hint from the
+    labelled header block of a single-part quote."""
+    out = {"description": "", "material": "", "lead_time": "", "vendor": ""}
 
-    # "<Supplier> Part Number : <value>" - the prefix is a strong vendor hint.
-    for m in re.finditer(
-            r"([A-Za-z][A-Za-z0-9&.\-/ ]{0,20}?)\s*part\s*"
-            r"(?:number|no\.?|num|#)\s*[:#]\s*([A-Za-z0-9][\w\-./]*)",
-            text, re.I):
-        prefix, value = m.group(1).strip(), m.group(2).strip()
-        if not value or prefix.lower() == "customer":
-            continue
-        out["part_number"] = value
-        if prefix and re.search(r"[A-Za-z]", prefix) and len(prefix) <= 15:
+    # "<Supplier> Part Number : <value>" - the prefix is a vendor hint (M&W).
+    m = re.search(r"([A-Za-z][A-Za-z0-9&.\-/ ]{0,15}?)\s*part\s*"
+                  r"(?:number|no\.?|num|#)\s*[:#]\s*[A-Za-z0-9]", text, re.I)
+    if m:
+        prefix = m.group(1).strip()
+        # Only a clean short token (e.g. "M&W") is a real vendor hint - not a
+        # phrase like "Current Delivery:" that happens to sit before "Part".
+        if (prefix.lower() != "customer"
+                and re.match(r"^[A-Za-z][A-Za-z0-9&.\-]{0,14}$", prefix)):
             out["vendor"] = prefix
-        break
 
-    m = re.search(r"material\s*[:#]\s*(.+)", text, re.I)
+    m = re.search(r"(?:material|mat'?l|matl)\s*[:#=]\s*(.+)", text, re.I)
     if m:
         out["material"] = m.group(1).strip()
 
-    m = re.search(r"(?:delivery\s*date|lead\s*time|delivery|lead)\s*[:#]\s*(.+)",
-                  text, re.I)
-    if m:
-        out["lead_time"] = m.group(1).strip()
+    for m in re.finditer(
+            r"(?:delivery\s*date|lead\s*time|delivery|lead)\s*[:#=][^\S\n]*(.+)",
+            text, re.I):
+        val = re.split(r"\s{2,}", m.group(1).strip())[0].strip()
+        # A real lead time has a number and a time unit; skip false hits like
+        # "Delivery: Part Number:".
+        if re.search(r"\d", val) and re.search(r"week|day|wk|month", val, re.I):
+            out["lead_time"] = val
+            break
 
     # Description: prefer the clean line under a "Comments" heading, else the
     # "Description:" field (trimmed of a trailing "Rev." fragment).
@@ -434,7 +594,9 @@ def _extract_labeled_fields(text: str, lines: List[str]) -> dict:
     except StopIteration:
         pass
     if not out["description"]:
-        m = re.search(r"description\s*[:#]\s*(.+)", text, re.I)
+        # [^\S\n]* = same-line whitespace only, so an empty "Description:" line
+        # doesn't swallow the next line ("Price Per:1").
+        m = re.search(r"description\s*[:#][^\S\n]*(\S.*)", text, re.I)
         if m:
             out["description"] = re.split(r"\s+rev\.?\s*[:#]", m.group(1),
                                           flags=re.I)[0].strip()
@@ -490,30 +652,64 @@ def parse_pdf(path: str) -> ParsedQuote:
     full_text = "\n".join(full_text_parts)
     lines = full_text.splitlines()
 
+    # Scanned / image-only PDF: no text to parse.  Open review empty so the
+    # user can key the numbers in (extracting these would need OCR).
+    if not full_text.strip():
+        quote.warnings.append(
+            "This looks like a scanned/image PDF (no selectable text). "
+            "Enter the price breaks manually — supplier and part number were "
+            "taken from the file name where possible.")
+        quote.vendor = _supplier_from_filename(path)
+        part = _part_from_filename(path)
+        quote.lines = ([QuoteLine(part_number=part, vendor=quote.vendor)]
+                       if part else [])
+        return quote
+
+    fields = _extract_labeled_fields(full_text, lines)
+    supplier = _extract_supplier(lines, full_text, fields["vendor"])
+    quote.currency = _infer_currency([full_text])
+
     if table_lines:
         # Multi-part tabular PDF.
         all_lines = table_lines
-        quote.vendor = _infer_vendor(lines[:12], path)
+        quote.vendor = supplier or _infer_vendor(lines[:12], path)
     else:
-        # Single-part quote: labelled fields + a text price block.
-        fields = _extract_labeled_fields(full_text, lines)
+        # Single-part quote: supplier + part number(s) + a text price block.
+        quote.vendor = supplier
+        part_numbers = _extract_part_numbers(full_text)
         breaks = _extract_price_block(lines)
-        if breaks:
-            quote.vendor = fields["vendor"]
+        if not breaks:
+            scan = _scan_price_pairs(lines, [])
+            breaks = scan[0].breaks if scan else []
+        item_label = _first_item_label(lines) if not part_numbers else ""
+        primary = (part_numbers[0] if part_numbers else
+                   item_label or _part_from_filename(path) or "(quote)")
+        description = fields["description"] or (item_label if part_numbers else "")
+        # With several parts on one quote the price rows can't be reliably
+        # matched to a part from text, so don't guess - let the user key them.
+        if len(part_numbers) > 1:
+            breaks = []
+        if breaks or part_numbers or item_label:
             all_lines = [QuoteLine(
-                part_number=fields["part_number"] or "(quote)",
-                description=fields["description"],
+                part_number=primary,
+                description=description,
                 material=fields["material"],
                 lead_time=fields["lead_time"],
-                vendor=fields["vendor"],
+                vendor=supplier,
                 breaks=breaks,
             )]
+            if len(part_numbers) > 1:
+                quote.warnings.append(
+                    "Multiple part numbers found (" + ", ".join(part_numbers) +
+                    "); prices weren't auto-filled — add a row per part and "
+                    "enter its price breaks.")
+            if not breaks:
+                quote.warnings.append(
+                    "Could not read the price breaks automatically — please "
+                    "enter them (supplier and part number were detected).")
         else:
-            all_lines = _scan_price_pairs(lines, quote.warnings)
-            if all_lines and not quote.vendor:
-                quote.vendor = fields["vendor"]
+            all_lines = []
 
-    quote.currency = _infer_currency([full_text])
     for ln in all_lines:
         if not ln.vendor:
             ln.vendor = quote.vendor
