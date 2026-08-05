@@ -29,6 +29,7 @@ echo  Running PyInstaller...
     --noconfirm --clean --onefile --windowed ^
     --name QuoteTracker ^
     --icon assets\icon.ico ^
+    --version-file assets\version_info.txt ^
     --add-data "assets;assets" ^
     --collect-all tkinterdnd2 ^
     --collect-all pdfplumber ^

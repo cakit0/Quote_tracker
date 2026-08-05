@@ -3,6 +3,11 @@ name: Build Windows EXE
 # Builds a standalone QuoteTracker.exe on a real Windows runner and uploads it
 # as a downloadable artifact. Runs on every push to the app branch and can be
 # started manually from the Actions tab (Run workflow).
+#
+# Code signing (optional): add repository secrets CERT_PFX_BASE64 (the .pfx
+# certificate, base64-encoded) and CERT_PASSWORD. When they are present the EXE
+# is signed automatically, which is what removes the SmartScreen
+# "unknown publisher" warning. Without them the build still succeeds, unsigned.
 
 on:
   push:
@@ -14,6 +19,9 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      CERT_PFX_BASE64: ${{ secrets.CERT_PFX_BASE64 }}
+      CERT_PASSWORD: ${{ secrets.CERT_PASSWORD }}
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -33,12 +41,32 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed
           --name QuoteTracker
           --icon assets/icon.ico
+          --version-file assets/version_info.txt
           --add-data "assets;assets"
           --collect-all tkinterdnd2
           --collect-all pdfplumber
           --collect-all pdfminer
           --collect-submodules openpyxl
           run.py
+
+      - name: Sign EXE
+        if: env.CERT_PFX_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX_BASE64))
+          # signtool ships with the Windows SDK but is not on PATH.
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' `
+              -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'x64' } |
+              Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { throw 'signtool.exe not found on the runner' }
+          & $signtool sign /f $pfx /p $env:CERT_PASSWORD `
+              /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+              dist\QuoteTracker.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed ($LASTEXITCODE)" }
+          Remove-Item $pfx -Force
+          & $signtool verify /pa dist\QuoteTracker.exe
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4

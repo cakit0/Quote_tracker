@@ -28,12 +28,49 @@ everything so you can compare suppliers side by side.
 3. Copy that `.exe` anywhere (e.g. your OneDrive Quoting folder) and
    double-click it. No Python required on that machine.
 
-### “Windows protected your PC” on first launch
-The `.exe` is not code-signed (a certificate is a paid, company-level purchase),
-so Windows SmartScreen shows a warning the first time it runs. It is not a virus
-detection — just an “unknown publisher” notice. Click **More info → Run anyway**;
-Windows remembers the choice. To remove it permanently, HAWE would need to buy a
-code-signing certificate and sign the `.exe` during the build.
+### “Windows protected your PC” (SmartScreen)
+
+This red dialog is **not** a virus detection. Windows shows it for any program
+downloaded from the internet that is not **code-signed** and has no download
+history (“Unknown publisher”). Options, cheapest first:
+
+**1. Run it anyway (per PC, free)**
+Click **More info → Run anyway**. Windows remembers it for that copy of the file.
+
+**2. Unblock the download (per PC, free, avoids the dialog entirely)**
+Windows tags downloaded files with a “mark of the web”. Remove it *before*
+extracting and the warning does not appear at all:
+- Right-click the downloaded **.zip → Properties →** tick **Unblock → OK**, then
+  extract. (Unblocking the zip clears the tag on everything inside.)
+- Or in PowerShell: `Unblock-File .\QuoteTracker-windows.zip`
+
+**3. Have IT distribute it (whole company, free if you have the tooling)**
+A file pushed through Intune/SCCM/GPO or copied from an internal file share
+does not carry the internet tag, so nobody sees the warning. IT can also add a
+SmartScreen/Defender allow-list entry for the app.
+
+**4. Code-sign the `.exe` (permanent, paid — the real fix)**
+A code-signing certificate issued to HAWE removes the warning for everyone and
+shows “HAWE Manufacturing US Inc” as the publisher instead of “Unknown”.
+- **OV certificate** (~$200–400/yr): the warning stops once the signed app
+  builds up download reputation (days to weeks).
+- **EV certificate** (~$400–700/yr, on a hardware token): trusted **immediately**,
+  no reputation period.
+
+The build is already wired for this — no code changes needed. Add two
+repository secrets and every build is signed automatically:
+
+| Secret | Value |
+|---|---|
+| `CERT_PFX_BASE64` | the `.pfx` certificate, base64-encoded (`certutil -encode cert.pfx cert.txt`) |
+| `CERT_PASSWORD` | the certificate’s password |
+
+Note that each *new* unsigned build is a new file, so its reputation starts over
+— another reason signing is the durable answer if this gets rolled out widely.
+
+**5. Skip the `.exe` entirely (free)**
+Run via **Option A** (`START_QUOTE_TRACKER.bat` with Python installed).
+SmartScreen’s app-reputation check does not apply, so no warning appears.
 
 ### Option C — download a pre-built `.exe` (no Python at all)
 A GitHub Actions workflow (`.github/workflows/build-windows-exe.yml`) builds the
