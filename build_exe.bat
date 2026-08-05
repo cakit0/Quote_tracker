@@ -28,6 +28,8 @@ echo  Running PyInstaller...
 %PYTHON% -m PyInstaller ^
     --noconfirm --clean --onefile --windowed ^
     --name QuoteTracker ^
+    --icon assets\icon.ico ^
+    --add-data "assets;assets" ^
     --collect-all tkinterdnd2 ^
     --collect-all pdfplumber ^
     --collect-all pdfminer ^

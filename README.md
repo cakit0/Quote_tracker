@@ -28,6 +28,13 @@ everything so you can compare suppliers side by side.
 3. Copy that `.exe` anywhere (e.g. your OneDrive Quoting folder) and
    double-click it. No Python required on that machine.
 
+### “Windows protected your PC” on first launch
+The `.exe` is not code-signed (a certificate is a paid, company-level purchase),
+so Windows SmartScreen shows a warning the first time it runs. It is not a virus
+detection — just an “unknown publisher” notice. Click **More info → Run anyway**;
+Windows remembers the choice. To remove it permanently, HAWE would need to buy a
+code-signing certificate and sign the `.exe` during the build.
+
 ### Option C — download a pre-built `.exe` (no Python at all)
 A GitHub Actions workflow (`.github/workflows/build-windows-exe.yml`) builds the
 Windows `.exe` on every push. To download it:

@@ -58,6 +58,7 @@ class QuoteTrackerApp:
         self.root.geometry("1200x780")
         self.root.minsize(960, 620)
         self.root.configure(bg=theme.GRAY_BG)
+        self._set_window_icon()
         theme.apply(self.root)
 
         self._build_menu()
@@ -65,6 +66,20 @@ class QuoteTrackerApp:
         self._build_kpis()
         self._build_tabs()
         self.refresh_all()
+
+    def _set_window_icon(self):
+        """Use the app icon for the window and taskbar (best effort)."""
+        try:
+            ico = config.resource_path("assets", "icon.ico")
+            if sys.platform.startswith("win") and ico.exists():
+                self.root.iconbitmap(default=str(ico))
+                return
+            png = config.resource_path("assets", "icon.png")
+            if png.exists():
+                self._icon_img = tk.PhotoImage(file=str(png))
+                self.root.iconphoto(True, self._icon_img)
+        except Exception:   # noqa: BLE001 - an icon is never worth crashing over
+            pass
 
     # ── menu bar ────────────────────────────────────────────────────────
     def _build_menu(self):

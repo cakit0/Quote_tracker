@@ -50,6 +50,18 @@ def save_settings(data: dict) -> None:
         pass
 
 
+def resource_path(*parts: str) -> Path:
+    """Locate a bundled resource (e.g. the icon).
+
+    PyInstaller unpacks bundled data into ``sys._MEIPASS`` at run time; from
+    source we look next to the project root.
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return Path(base).joinpath(*parts)
+    return Path(__file__).resolve().parent.parent.joinpath(*parts)
+
+
 def default_db_dir() -> Path:
     """Where the database lives if the user has never chosen a folder.
 

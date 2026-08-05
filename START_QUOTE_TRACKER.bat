@@ -1,49 +1,49 @@
 @echo off
 title HAWE Quote Tracker
-color 0C
-
-echo.
-echo  ============================================
-echo   HAWE Quote Tracker - Starting...
-echo  ============================================
-echo.
+setlocal
 
 :: Run from the folder this batch file lives in (e.g. a OneDrive folder).
 cd /d "%~dp0"
 
-:: Locate Python (prefer 'python', fall back to 'py' launcher).
+:: Locate Python (prefer 'python', fall back to the 'py' launcher).
 set PYTHON=
 python --version >nul 2>&1 && set PYTHON=python
 if not defined PYTHON (
     py --version >nul 2>&1 && set PYTHON=py
 )
 if not defined PYTHON (
-    echo  ERROR: Python is not installed or not on PATH.
     echo.
-    echo  Install Python 3.9+ from https://www.python.org/downloads/
-    echo  and tick "Add Python to PATH" during setup.
+    echo  Python was not found on this PC.
+    echo.
+    echo  Install Python 3.9 or newer from https://www.python.org/downloads/
+    echo  and tick "Add Python to PATH" during setup, then run this again.
     echo.
     pause
     exit /b 1
 )
 
-echo  Checking dependencies (first run only)...
+:: Install requirements on the first run only (quiet unless something fails).
 %PYTHON% -c "import pdfplumber, openpyxl" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo  Installing required packages...
-    %PYTHON% -m pip install --user -r requirements.txt
+    echo Setting up for first use, this takes a minute...
+    %PYTHON% -m pip install --user --quiet -r requirements.txt
     if %errorlevel% neq 0 (
         echo.
-        echo  ERROR: Could not install packages. Check your internet connection.
+        echo  Setup failed - check your internet connection and try again.
+        echo.
         pause
         exit /b 1
     )
 )
 
-:: Drag-and-drop is optional; install it quietly if missing.
-%PYTHON% -c "import tkinterdnd2" >nul 2>&1 || %PYTHON% -m pip install --user tkinterdnd2 >nul 2>&1
+:: Drag-and-drop support is optional; install quietly if missing.
+%PYTHON% -c "import tkinterdnd2" >nul 2>&1 || %PYTHON% -m pip install --user --quiet tkinterdnd2 >nul 2>&1
 
-echo  Launching...
-echo.
-%PYTHON% -m quote_tracker.main
-if %errorlevel% neq 0 pause
+:: Launch with pythonw (the windowless interpreter) so no console stays open.
+:: 'start' returns immediately, letting this window close right away.
+if /i "%PYTHON%"=="py" (
+    start "" %PYTHON% -w -m quote_tracker.main
+) else (
+    start "" pythonw -m quote_tracker.main 2>nul || start "" %PYTHON% -m quote_tracker.main
+)
+exit /b 0
