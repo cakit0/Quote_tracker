@@ -48,14 +48,28 @@ so it can live in a shared OneDrive folder. Back it up by copying that file.
   that’s wrong (double-click a cell to edit), set the supplier name, then
   **Save to database**. Nothing is stored until you confirm — important for
   PDFs, where extraction is a best guess.
-- **Quote Log tab** — every quote line, all suppliers, searchable and filterable
-  by supplier. One column per quantity break.
-- **Comparison tab** — for each part, the **lowest unit price at every quantity**
-  and **which supplier** offers it.
-- **Files tab** — the files you’ve loaded; remove one to remove its lines.
-- **Export to Excel** — writes a two-sheet workbook (full Quote Log + Best Price).
+- **Quote Log tab** — every quote line, all suppliers. Filter by **Part #**,
+  **Supplier** and free-text **Search** (combine them; *Clear filters* resets).
+  One column per quantity break.
+- **Study tab** — the decision table. For each part it lists **every supplier**
+  side by side with material, lead time, tooling and price at each quantity.
+  A **★** marks the **lowest price at each quantity** and the **fastest
+  delivery**, so you can weigh price against lead time (e.g. one supplier
+  cheaper but slower, another pricier but faster). Filter by Part # / Supplier.
+- **Files tab** — the files you’ve loaded. **Download original** or **Open
+  original** re-opens the exact file you imported. Originals are kept for
+  re-download and **auto-removed after 6 months** (the quote data itself is
+  always kept). Remove a file to remove its lines.
+- **Database menu** — **Set database folder…** (move the `.db` to any folder,
+  e.g. OneDrive), **Back up database now…** (timestamped copy), **Open database
+  folder**, and a manual **purge** of originals older than 6 months.
+- **Export to Excel** — writes a two-sheet workbook: full **Quote Log** and a
+  **Study** sheet with best price / fastest delivery highlighted in green.
 
 Loading the same file twice is detected (by content hash) and skipped.
+
+Your chosen database folder is remembered between runs (stored in
+`%APPDATA%\HAWEQuoteTracker\settings.json` on Windows).
 
 ---
 
@@ -93,10 +107,11 @@ fully — just use the **Browse files…** button instead.
 ```
 quote_tracker/
   main.py          entry point (creates the window)
-  gui.py           main window: tabs, KPIs, tables, export
+  gui.py           main window: tabs, KPIs, tables, filters, export, DB menu
   review_dialog.py editable review grid shown before saving
   parsers.py       PDF / Excel / CSV extraction
-  database.py      SQLite storage (flexible quantity model)
+  database.py      SQLite storage (flexible quantity model, originals, study)
+  config.py        remembers the chosen database folder between runs
   models.py        shared data classes
   theme.py         HAWE colours and ttk styling
 tests/
@@ -124,5 +139,9 @@ python -m tests.test_gui_smoke     # GUI construction (needs Tkinter/display)
 
 ## Version
 
-v2.0 — Desktop Edition. Adds PDF support, a native window, a review-before-save
+v2.1 — Adds the Study comparison (price + delivery), Part #/Supplier filters,
+downloadable originals with 6-month retention, and a choosable/backupable
+database folder.
+
+v2.0 — Desktop Edition. PDF support, a native window, a review-before-save
 step, and a flexible quantity model.

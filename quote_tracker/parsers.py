@@ -94,6 +94,7 @@ def clean_str(val) -> str:
 
 # Header keywords -> logical field.  Order matters (first match wins per cell).
 _FIELD_PATTERNS = [
+    ("vendor",      r"\b(vendor|supplier|manufacturer|mfg|source)\b"),
     # No trailing \b here: several alternatives end in '#', where a trailing
     # word boundary can never match (# is already a non-word character).
     ("part_number", r"(part\s*#|part\s*(?:no|num|number)|drawing\s*#|"
@@ -225,6 +226,7 @@ def _parse_wide(data_rows, fields, qty_cols, default_vendor) -> List[QuoteLine]:
                 breaks.append(PriceBreak(quantity=qty, unit_price=price))
         if not breaks:
             continue
+        row_vendor = clean_str(_cell(row, fields.get("vendor")))
         lines.append(QuoteLine(
             part_number=part or desc,
             description=desc,
@@ -232,7 +234,7 @@ def _parse_wide(data_rows, fields, qty_cols, default_vendor) -> List[QuoteLine]:
             moq=parse_number(_cell(row, fields.get("moq"))),
             lead_time=clean_str(_cell(row, fields.get("lead_time"))),
             tooling=parse_number(_cell(row, fields.get("tooling"))),
-            vendor=default_vendor,
+            vendor=row_vendor or default_vendor,
             breaks=breaks,
         ))
     return lines
@@ -259,7 +261,7 @@ def _parse_long(data_rows, fields, default_vendor, warnings) -> List[QuoteLine]:
                 part_number=part,
                 description=clean_str(_cell(row, fields.get("description"))),
                 material=clean_str(_cell(row, fields.get("material"))),
-                vendor=default_vendor,
+                vendor=clean_str(_cell(row, fields.get("vendor"))) or default_vendor,
             )
             order.append(part)
         grouped[part].breaks.append(PriceBreak(quantity=qty, unit_price=price))

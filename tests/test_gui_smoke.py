@@ -52,7 +52,7 @@ def main():
     check(app.log_tree is not None, "quote-log table built")
     # 3 lines from vendor_A + 2 lines from vendor_B = 5 quote lines total.
     check(len(app.log_tree.get_children()) == 5, "5 rows in quote log")
-    check(app.cmp_tree is not None, "comparison table built")
+    check(app.study_tree is not None, "study table built")
     check(len(app.files_tree.get_children()) == 2, "2 files listed")
 
     print("\n[dynamic columns follow the data]")
@@ -66,6 +66,36 @@ def main():
     check(len(app.log_tree.get_children()) == 1, "search filters to 1 row")
     app.search_var.set("")
     root.update_idletasks()
+
+    print("\n[study tab + delivery comparison]")
+    # Load the multi-supplier overview sheet so the Study tab has real groups.
+    ov = os.path.join(SAMPLES, "overview_sheet.xlsx")
+    if os.path.exists(ov):
+        with open(ov, "rb") as fh:
+            db.save_quote(parse_file(ov), "overview_sheet.xlsx",
+                          file_hash="ovh", original_bytes=fh.read())
+        app.refresh_all()
+        root.update_idletasks()
+        check(app.study_tree is not None, "study tree built")
+        parents = app.study_tree.get_children()
+        check(len(parents) > 0, f"study has part groups (got {len(parents)})")
+        # Find the 17-30034-CN group and verify a star marks the best price.
+        starred = any(
+            "★" in " ".join(str(v) for v in app.study_tree.item(child, "values"))
+            for p in parents for child in app.study_tree.get_children(p))
+        check(starred, "best price/delivery is marked with a star")
+
+    print("\n[files: original stored + retrievable]")
+    files = app.db.list_files()
+    fid = files[0]["id"]
+    check(any(f["has_original"] for f in files), "at least one original stored")
+    orig = app.db.get_original(fid)
+    check(orig is not None, "original file retrievable for download")
+
+    print("\n[backup]")
+    bdir = tempfile.mkdtemp()
+    bpath = app.db.backup_to(bdir)
+    check(os.path.exists(bpath) and os.path.getsize(bpath) > 0, "backup written")
 
     print("\n[review dialog collect]")
     q = parse_file(os.path.join(SAMPLES, "vendor_C_quote.pdf"))
@@ -85,11 +115,13 @@ def main():
     check(saved["quote"].lines[0].part_number == "EDITED-001", "grid edit captured")
     check(saved["quote"].vendor == "Rapid Tooling Inc", "vendor captured")
 
-    # Persist it and confirm the window refreshes to 3 files.
+    # Persist it and confirm the window refreshes (file count grows by one).
+    before = int(app.kpi_cards["files"].cget("text"))
     db.save_quote(saved["quote"], "vendor_C_quote.pdf")
     app.refresh_all()
     root.update_idletasks()
-    check(app.kpi_cards["files"].cget("text") == "3", "KPI files == 3 after save")
+    after = int(app.kpi_cards["files"].cget("text"))
+    check(after == before + 1, f"file count grew after save ({before}->{after})")
 
     print("\n[excel export]")
     out = os.path.join(tmp, "export.xlsx")
@@ -97,8 +129,8 @@ def main():
     check(os.path.exists(out) and os.path.getsize(out) > 0, "export.xlsx written")
     from openpyxl import load_workbook
     wb = load_workbook(out)
-    check("Quote Log" in wb.sheetnames and "Best Price" in wb.sheetnames,
-          "export has Quote Log + Best Price sheets")
+    check("Quote Log" in wb.sheetnames and "Study" in wb.sheetnames,
+          "export has Quote Log + Study sheets")
 
     root.destroy()
     print("\n" + "=" * 50)

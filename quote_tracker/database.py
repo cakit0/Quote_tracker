@@ -14,11 +14,38 @@ in a shared OneDrive folder, exactly like the original tool.
 from __future__ import annotations
 
 import hashlib
+import re
+import shutil
 import sqlite3
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .models import ParsedQuote, QuoteLine
+
+# How long original quote files are kept before being purged from the database.
+ORIGINAL_RETENTION_DAYS = 183   # ~6 months
+
+
+def lead_time_weeks(text: str) -> Optional[float]:
+    """Convert a free-text lead time to a comparable number of weeks.
+
+    "4-6 weeks" -> 5.0 (midpoint), "10 to 11 Weeks" -> 10.5, "30 days" -> ~4.3,
+    "8 wks" -> 8.0.  Returns None when no number can be found, so unknown lead
+    times never win a "fastest delivery" comparison.
+    """
+    if not text:
+        return None
+    low = text.lower()
+    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", low)]
+    if not nums:
+        return None
+    value = sum(nums[:2]) / len(nums[:2])   # midpoint of a range, else the value
+    if "day" in low and "week" not in low and "wk" not in low:
+        value /= 7.0
+    elif "month" in low:
+        value *= 4.345
+    return round(value, 2)
 
 
 class QuoteDB:
@@ -74,6 +101,16 @@ class QuoteDB:
                     unit_price  REAL NOT NULL
                 );
 
+                -- Original uploaded file, kept so it can be re-downloaded.
+                -- Auto-purged after ORIGINAL_RETENTION_DAYS (see purge_old_originals).
+                CREATE TABLE IF NOT EXISTS quote_originals (
+                    file_id     INTEGER PRIMARY KEY REFERENCES quote_files(id) ON DELETE CASCADE,
+                    filename    TEXT,
+                    content     BLOB,
+                    byte_size   INTEGER,
+                    stored_at   TEXT DEFAULT (datetime('now','localtime'))
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_lines_part   ON quote_lines(part_number);
                 CREATE INDEX IF NOT EXISTS idx_lines_vendor ON quote_lines(vendor);
                 CREATE INDEX IF NOT EXISTS idx_lines_file   ON quote_lines(file_id);
@@ -100,8 +137,13 @@ class QuoteDB:
 
     # ── writes ──────────────────────────────────────────────────────────
     def save_quote(self, quote: ParsedQuote, filename: str,
-                   file_hash: Optional[str] = None) -> int:
-        """Persist a (possibly user-edited) ParsedQuote. Returns the file id."""
+                   file_hash: Optional[str] = None,
+                   original_bytes: Optional[bytes] = None) -> int:
+        """Persist a (possibly user-edited) ParsedQuote. Returns the file id.
+
+        When ``original_bytes`` is given the source file is kept so it can be
+        re-downloaded later (auto-purged after ORIGINAL_RETENTION_DAYS).
+        """
         with self._connect() as conn:
             cur = conn.execute(
                 """INSERT INTO quote_files
@@ -128,7 +170,57 @@ class QuoteDB:
                     "VALUES (?, ?, ?)",
                     [(line_id, b.quantity, b.unit_price) for b in ln.breaks],
                 )
+            if original_bytes is not None:
+                conn.execute(
+                    """INSERT INTO quote_originals
+                           (file_id, filename, content, byte_size)
+                       VALUES (?, ?, ?, ?)""",
+                    (file_id, filename, sqlite3.Binary(original_bytes),
+                     len(original_bytes)),
+                )
         return file_id
+
+    # ── original files (download / retention) ───────────────────────────
+    def get_original(self, file_id: int) -> Optional[Tuple[str, bytes]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT filename, content FROM quote_originals WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+        if row is None or row["content"] is None:
+            return None
+        return row["filename"], bytes(row["content"])
+
+    def purge_old_originals(self, days: int = ORIGINAL_RETENTION_DAYS) -> int:
+        """Delete stored original files older than ``days``.  Quote data (the
+        parsed lines) is kept - only the re-downloadable file is dropped."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM quote_originals "
+                "WHERE stored_at < datetime('now','localtime', ?)",
+                (f"-{int(days)} days",),
+            )
+            return cur.rowcount
+
+    def save_as(self, dest_file: str) -> str:
+        """Copy the whole database (incl. stored originals) to ``dest_file``
+        using the SQLite backup API - safe even with WAL data pending."""
+        Path(dest_file).parent.mkdir(parents=True, exist_ok=True)
+        src = self._connect()
+        try:
+            dst = sqlite3.connect(str(dest_file))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        return str(dest_file)
+
+    def backup_to(self, dest_dir: str) -> str:
+        """Copy the database to ``dest_dir`` with a timestamped name."""
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return self.save_as(str(Path(dest_dir) / f"hawe_quotes_backup_{stamp}.db"))
 
     def delete_file(self, file_id: int) -> None:
         with self._connect() as conn:
@@ -147,8 +239,22 @@ class QuoteDB:
     def list_files(self) -> List[sqlite3.Row]:
         with self._connect() as conn:
             return conn.execute(
-                "SELECT * FROM quote_files ORDER BY loaded_at DESC, id DESC"
+                """SELECT qf.*,
+                          (qo.file_id IS NOT NULL) AS has_original,
+                          qo.byte_size AS original_size
+                   FROM quote_files qf
+                   LEFT JOIN quote_originals qo ON qo.file_id = qf.id
+                   ORDER BY qf.loaded_at DESC, qf.id DESC"""
             ).fetchall()
+
+    def part_numbers(self) -> List[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT part_number FROM quote_lines "
+                "WHERE part_number IS NOT NULL AND part_number <> '' "
+                "ORDER BY part_number"
+            ).fetchall()
+        return [r["part_number"] for r in rows]
 
     def distinct_quantities(self) -> List[float]:
         with self._connect() as conn:
@@ -179,7 +285,8 @@ class QuoteDB:
                                      "WHERE unit_price > 0"),
             }
 
-    def quote_log(self, search: str = "", vendor: str = "") -> List[Dict]:
+    def quote_log(self, search: str = "", vendor: str = "",
+                  part_number: str = "") -> List[Dict]:
         """Flat list of lines with their breaks folded into a dict."""
         sql = """
             SELECT ql.id, ql.vendor, ql.part_number, ql.description, ql.material,
@@ -193,6 +300,9 @@ class QuoteDB:
         if vendor:
             sql += " AND ql.vendor = ?"
             params.append(vendor)
+        if part_number:
+            sql += " AND ql.part_number = ?"
+            params.append(part_number)
         if search:
             sql += (" AND (ql.part_number LIKE ? OR ql.description LIKE ? "
                     "OR ql.vendor LIKE ?)")
@@ -245,6 +355,63 @@ class QuoteDB:
             result.append(g)
         result.sort(key=lambda x: str(x["part_number"]))
         return result
+
+    def study(self, part_number: str = "", vendor: str = "") -> List[Dict]:
+        """Per-part supplier comparison for the decision study.
+
+        Returns one group per part number, each with every supplier's price
+        breaks, lead time and tooling.  Within a group it flags the lowest price
+        at each quantity and the fastest lead time, so price-vs-delivery
+        tradeoffs are visible at a glance.
+        """
+        sql = """
+            SELECT ql.id, ql.part_number, ql.description, ql.vendor, ql.material,
+                   ql.moq, ql.lead_time, ql.tooling
+            FROM quote_lines ql
+            WHERE 1=1
+        """
+        params: List = []
+        if part_number:
+            sql += " AND ql.part_number = ?"
+            params.append(part_number)
+        if vendor:
+            sql += " AND ql.vendor = ?"
+            params.append(vendor)
+        sql += " ORDER BY ql.part_number, ql.vendor"
+
+        with self._connect() as conn:
+            lines = [dict(r) for r in conn.execute(sql, params).fetchall()]
+            for ln in lines:
+                brks = conn.execute(
+                    "SELECT quantity, unit_price FROM price_breaks "
+                    "WHERE line_id = ? ORDER BY quantity", (ln["id"],)
+                ).fetchall()
+                ln["breaks"] = {b["quantity"]: b["unit_price"] for b in brks}
+                ln["lead_weeks"] = lead_time_weeks(ln["lead_time"] or "")
+
+        groups: Dict[str, Dict] = {}
+        order: List[str] = []
+        for ln in lines:
+            part = ln["part_number"] or "(unknown)"
+            if part not in groups:
+                groups[part] = {"part_number": part,
+                                "description": ln["description"] or "",
+                                "suppliers": [],
+                                "best_price": {},   # qty -> min price
+                                "best_lead": None}
+                order.append(part)
+            g = groups[part]
+            if not g["description"] and ln["description"]:
+                g["description"] = ln["description"]
+            g["suppliers"].append(ln)
+            for qty, price in ln["breaks"].items():
+                if price and price > 0:
+                    if qty not in g["best_price"] or price < g["best_price"][qty]:
+                        g["best_price"][qty] = price
+            lw = ln["lead_weeks"]
+            if lw is not None and (g["best_lead"] is None or lw < g["best_lead"]):
+                g["best_lead"] = lw
+        return [groups[p] for p in order]
 
     def export_rows(self) -> List[Dict]:
         return self.quote_log()

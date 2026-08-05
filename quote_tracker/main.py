@@ -5,23 +5,14 @@ Creates the main window and starts the Tk event loop.  Drag-and-drop is enabled
 when the optional ``tkinterdnd2`` package is available; otherwise the Browse
 button is used (the app is fully functional either way).
 
-The SQLite database is created next to the executable / script by default so it
-can live in a shared OneDrive folder, exactly like the original tool.  Override
-with the QUOTE_TRACKER_DB environment variable.
+The database location is resolved by ``config.get_db_path`` (env override → the
+folder chosen in the app → a default next to the executable), so it can live in
+a shared OneDrive folder, exactly like the original tool.
 """
 
 from __future__ import annotations
 
-import os
 import sys
-from pathlib import Path
-
-
-def _app_dir() -> Path:
-    """Folder the app 'lives' in (handles PyInstaller one-file builds)."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
 
 
 def _make_root():
@@ -35,7 +26,8 @@ def _make_root():
 
 
 def main() -> int:
-    db_path = os.environ.get("QUOTE_TRACKER_DB") or str(_app_dir() / "hawe_quotes.db")
+    from . import config
+    db_path = config.get_db_path()
 
     try:
         import tkinter  # noqa: F401
@@ -51,7 +43,13 @@ def main() -> int:
     # Import here so a missing display fails cleanly rather than at module load.
     from .gui import QuoteTrackerApp
 
-    QuoteTrackerApp(root, db_path=db_path, dnd_enabled=dnd)
+    app = QuoteTrackerApp(root, db_path=db_path, dnd_enabled=dnd)
+    # Enforce the 6-month retention on the stored original files at startup.
+    try:
+        app.db.purge_old_originals()
+        app.refresh_files()
+    except Exception:   # noqa: BLE001
+        pass
     root.mainloop()
     return 0
 
