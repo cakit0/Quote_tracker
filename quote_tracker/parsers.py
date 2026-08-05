@@ -509,6 +509,34 @@ def _extract_part_numbers(text: str) -> List[str]:
     return []
 
 
+def _extract_quote_number(text: str, path: str = "") -> str:
+    """The supplier's own quote reference, e.g. 54446, Q19054, ND3253368-B---002.
+
+    Handles the labelled forms ("Quote Number:6274", "Quote No:Q19054",
+    "Quote: 54446") and the bare form ("Quote ND3253368-B---002").  ``\\bquote\\b``
+    keeps "Quoted Date"/"Quoted prices" out, and the bare form requires a digit
+    so a heading like "Quote HAWE Manufacturing" is never picked up.
+    """
+    m = re.search(r"\bquote\s*(?:number|no\.?|#|ref(?:erence)?)?\s*[:#]\s*"
+                  r"([A-Za-z0-9][\w\-/]*)", text, re.I)
+    if m:
+        val = m.group(1).strip().rstrip(".,;")
+        if re.search(r"\d", val):
+            return val
+    m = re.search(r"\bquote\s+([A-Za-z]{0,4}[\w\-]*\d[\w\-]*)", text, re.I)
+    if m:
+        val = m.group(1).strip().rstrip(".,;")
+        # Skip dates and page markers that can follow the word "Quote".
+        if not re.match(r"^\d{1,2}[/-]\d{1,2}", val):
+            return val
+    if path:
+        stem = re.sub(r"[_\-]+", " ", Path(path).stem)
+        m = re.match(r"^\s*([A-Za-z]{0,3}\d{4,8}[A-Za-z]?)\b", stem)
+        if m:
+            return m.group(1)
+    return ""
+
+
 def _part_from_filename(path: str) -> str:
     # Underscores are word characters, which would defeat the \b anchors below,
     # so treat them as separators first ("2520015US_Rev" -> "2520015US Rev").
@@ -660,13 +688,16 @@ def parse_pdf(path: str) -> ParsedQuote:
             "Enter the price breaks manually — supplier and part number were "
             "taken from the file name where possible.")
         quote.vendor = _supplier_from_filename(path)
+        quote.quote_number = _extract_quote_number("", path)
         part = _part_from_filename(path)
-        quote.lines = ([QuoteLine(part_number=part, vendor=quote.vendor)]
+        quote.lines = ([QuoteLine(part_number=part, vendor=quote.vendor,
+                                  quote_number=quote.quote_number)]
                        if part else [])
         return quote
 
     fields = _extract_labeled_fields(full_text, lines)
     supplier = _extract_supplier(lines, full_text, fields["vendor"])
+    quote.quote_number = _extract_quote_number(full_text, path)
     quote.currency = _infer_currency([full_text])
 
     if table_lines:
@@ -696,6 +727,7 @@ def parse_pdf(path: str) -> ParsedQuote:
                 material=fields["material"],
                 lead_time=fields["lead_time"],
                 vendor=supplier,
+                quote_number=quote.quote_number,
                 breaks=breaks,
             )]
             if len(part_numbers) > 1:
@@ -713,6 +745,8 @@ def parse_pdf(path: str) -> ParsedQuote:
     for ln in all_lines:
         if not ln.vendor:
             ln.vendor = quote.vendor
+        if not ln.quote_number:
+            ln.quote_number = quote.quote_number
     quote.lines = all_lines
     if not all_lines and not quote.warnings:
         quote.warnings.append("No tables or price breaks found in PDF.")

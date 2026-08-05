@@ -29,6 +29,7 @@ class QuoteLine:
     lead_time: str = ""
     tooling: Optional[float] = None
     vendor: str = ""
+    quote_number: str = ""
     notes: str = ""
     breaks: List[PriceBreak] = field(default_factory=list)
 
@@ -44,6 +45,7 @@ class ParsedQuote:
     """The full result of parsing one file."""
     source_type: str = ""              # pdf / xlsx / csv
     vendor: str = ""
+    quote_number: str = ""             # the supplier's own quote reference
     project: str = ""
     currency: str = ""
     lines: List[QuoteLine] = field(default_factory=list)

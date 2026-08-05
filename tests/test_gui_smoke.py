@@ -10,6 +10,7 @@ refresh-time errors that the pure-logic tests can't.
 """
 
 import os
+import re
 import sys
 import tempfile
 
@@ -20,6 +21,7 @@ from quote_tracker.parsers import parse_file                 # noqa: E402
 from quote_tracker.database import QuoteDB                   # noqa: E402
 from quote_tracker.gui import QuoteTrackerApp                # noqa: E402
 from quote_tracker.review_dialog import ReviewDialog         # noqa: E402
+from quote_tracker.edit_dialog import EditLineDialog          # noqa: E402
 
 SAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "samples")
 failures = []
@@ -57,7 +59,8 @@ def main():
 
     print("\n[dynamic columns follow the data]")
     # Quote log should have one @column per distinct quantity (100,500,1000,5000).
-    qcols = [c for c in app.log_tree["columns"] if c.startswith("q")]
+    # Quantity columns are q<number>; don't confuse them with "quote_number".
+    qcols = [c for c in app.log_tree["columns"] if re.fullmatch(r"q[\d.]+", c)]
     check(len(qcols) == 4, f"4 quantity columns in log (got {len(qcols)})")
 
     print("\n[filter]")
@@ -122,6 +125,44 @@ def main():
     root.update_idletasks()
     after = int(app.kpi_cards["files"].cget("text"))
     check(after == before + 1, f"file count grew after save ({before}->{after})")
+
+    print("\n[hide empty columns]")
+    # vendor_A/B data has no tooling or MOQ, so those columns must be hidden.
+    shown = list(app.log_tree["displaycolumns"])
+    all_keys = list(app.log_tree["columns"])
+    check("part_number" in shown, "populated column stays visible")
+    empties = [k for k in all_keys
+               if all(not str(app.log_tree.set(i, k)).strip()
+                      for i in app.log_tree.get_children())]
+    check(all(k not in shown for k in empties),
+          f"blank columns auto-hidden ({len(empties)} hidden)")
+    # A user can force a hidden column back on.
+    if empties:
+        app.log_shown_manual.add(empties[0])
+        app.refresh_log()
+        check(empties[0] in list(app.log_tree["displaycolumns"]),
+              "user can re-show a hidden column")
+        app.log_shown_manual.clear()
+        app.refresh_log()
+
+    print("\n[edit a saved line]")
+    first = app.log_tree.get_children()[0]
+    line_id = int(first)
+    before = app.db.get_line(line_id)
+    check(before is not None, "line loaded for editing")
+    holder = {}
+    dlg = EditLineDialog(root, before,
+                         lambda v, b: holder.update(values=v, breaks=b))
+    root.update_idletasks()
+    dlg.vars["part_number"].set("EDITED-PN")
+    dlg.vars["quote_number"].set("QN-123")
+    dlg._save()
+    root.update_idletasks()
+    app.db.update_line(line_id, holder["values"], holder["breaks"])
+    after = app.db.get_line(line_id)
+    check(after["part_number"] == "EDITED-PN", "edited part number saved")
+    check(after["quote_number"] == "QN-123", "quote number saved")
+    check(after["breaks"] == before["breaks"], "price breaks preserved")
 
     print("\n[excel export]")
     out = os.path.join(tmp, "export.xlsx")

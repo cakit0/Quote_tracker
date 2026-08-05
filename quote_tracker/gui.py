@@ -28,6 +28,7 @@ from . import theme, config
 from .database import QuoteDB, ORIGINAL_RETENTION_DAYS
 from .parsers import parse_file, SUPPORTED_EXTENSIONS
 from .review_dialog import ReviewDialog
+from .edit_dialog import EditLineDialog, ColumnChooser
 
 APP_TITLE = "HAWE Quote Tracker"
 APP_SUBTITLE = "Supplier price tracker — drag a PDF, Excel or CSV quote to begin"
@@ -53,6 +54,12 @@ class QuoteTrackerApp:
         self.db = QuoteDB(db_path)
         self.db_path = db_path
         self.dnd_enabled = dnd_enabled
+        # Column visibility: auto-hidden empty columns, plus the user's own
+        # explicit show/hide choices which always win over the automatic ones.
+        self.log_hidden_manual: set = set()
+        self.log_shown_manual: set = set()
+        self.study_hidden_manual: set = set()
+        self.study_shown_manual: set = set()
 
         self.root.title(APP_TITLE)
         self.root.geometry("1200x780")
@@ -218,12 +225,25 @@ class QuoteTrackerApp:
         self.vendor_cb.pack(side="left", padx=(6, 0))
         self.vendor_cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_log())
 
-        ttk.Button(bar, text="Export to Excel", style="Ghost.TButton",
-                   command=self._export_excel).pack(side="right")
-        ttk.Button(bar, text="Delete line", style="Ghost.TButton",
-                   command=self._delete_line).pack(side="right", padx=(0, 8))
         ttk.Button(bar, text="Clear filters", style="Ghost.TButton",
-                   command=self._clear_log_filters).pack(side="right", padx=(0, 8))
+                   command=self._clear_log_filters).pack(side="right")
+
+        # Actions live on their own row so nothing gets squeezed off at
+        # narrower window widths.
+        actions = ttk.Frame(tab)
+        actions.pack(fill="x", pady=(0, 10))
+        ttk.Label(actions,
+                  text="Double-click a row to edit it • right-click a heading "
+                       "to hide that column",
+                  style="Muted.TLabel").pack(side="left")
+        ttk.Button(actions, text="Export to Excel", style="Ghost.TButton",
+                   command=self._export_excel).pack(side="right")
+        ttk.Button(actions, text="Delete line", style="Ghost.TButton",
+                   command=self._delete_line).pack(side="right", padx=(0, 8))
+        ttk.Button(actions, text="Columns…", style="Ghost.TButton",
+                   command=self._choose_log_columns).pack(side="right", padx=(0, 8))
+        ttk.Button(actions, text="Edit line", style="Accent.TButton",
+                   command=self._edit_line).pack(side="right", padx=(0, 8))
 
         self.log_wrap = ttk.Frame(tab, style="Card.TFrame", padding=1)
         self.log_wrap.pack(fill="both", expand=True)
@@ -251,6 +271,8 @@ class QuoteTrackerApp:
         self.study_vendor_cb.bind("<<ComboboxSelected>>",
                                   lambda e: self.refresh_study())
 
+        ttk.Button(bar, text="Columns…", style="Ghost.TButton",
+                   command=self._choose_study_columns).pack(side="right", padx=(8, 0))
         ttk.Button(bar, text="Collapse all", style="Ghost.TButton",
                    command=lambda: self._expand_study(False)).pack(side="right")
         ttk.Button(bar, text="Expand all", style="Ghost.TButton",
@@ -420,19 +442,35 @@ class QuoteTrackerApp:
                                  vendor=self._sel(self.vendor_var),
                                  part_number=self._sel(self.log_part_var))
         base = [("part_number", "Part #", 130), ("vendor", "Supplier", 150),
+                ("quote_number", "Quote #", 100),
                 ("description", "Description", 180), ("material", "Material", 100),
                 ("lead_time", "Lead Time", 90)]
         qcols = [(f"q{q:g}", f"@{q:g}", 80) for q in quantities]
+        columns = base + qcols
+        self.log_columns = columns
+
         self.log_tree = self._rebuild_tree(self.log_wrap, self.log_tree,
-                                           base + qcols,
+                                           columns,
                                            right_align={c[0] for c in qcols})
         for r in rows:
-            vals = [r["part_number"], r["vendor"] or "", r["description"] or "",
-                    r["material"] or "", r["lead_time"] or ""]
+            vals = [r["part_number"], r["vendor"] or "", r["quote_number"] or "",
+                    r["description"] or "", r["material"] or "",
+                    r["lead_time"] or ""]
             for q in quantities:
                 p = r["breaks"].get(q)
                 vals.append("" if p is None else f"{p:,.2f}")
             self.log_tree.insert("", "end", iid=str(r["id"]), values=vals)
+
+        # Hide columns that are entirely empty for the current rows, so blank
+        # quantity columns don't clutter the table.
+        empty = self._empty_columns(self.log_tree, [c[0] for c in columns])
+        self._apply_visibility(self.log_tree, columns, empty,
+                               self.log_hidden_manual, self.log_shown_manual)
+        self.log_tree.bind("<Double-1>", lambda e: self._edit_line())
+        self.log_tree.bind("<Button-3>",
+                           lambda e: self._hide_clicked_column(
+                               e, self.log_tree, self.log_hidden_manual,
+                               self.log_shown_manual, self.refresh_log))
 
     def refresh_study(self):
         data = self.db.study(part_number=self._sel(self.study_part_var),
@@ -448,20 +486,21 @@ class QuoteTrackerApp:
         # Decision fields (supplier, material, delivery) sit on the left so
         # price and lead time are visible together; the price columns extend
         # to the right.
-        cols = ["material", "lead_time", "tooling", "moq"] + \
-               [f"q{q:g}" for q in quantities]
+        spec = [("quote_number", "Quote #", 100, "w"),
+                ("material", "Material", 150, "w"),
+                ("lead_time", "Lead Time", 110, "w"),
+                ("tooling", "Tooling", 75, "e"),
+                ("moq", "MOQ", 65, "e")]
+        spec += [(f"q{q:g}", f"@{q:g}", 90, "e") for q in quantities]
+        cols = [k for k, _l, _w, _a in spec]
+        self.study_columns = [(k, l, w) for k, l, w, _a in spec]
+
         tree = ttk.Treeview(holder, columns=cols, show="tree headings")
         tree.heading("#0", text="Part #  /  Supplier")
         tree.column("#0", width=230, stretch=False)
-        for key, label, w, anchor in [("material", "Material", 150, "w"),
-                                      ("lead_time", "Lead Time", 110, "w"),
-                                      ("tooling", "Tooling", 75, "e"),
-                                      ("moq", "MOQ", 65, "e")]:
+        for key, label, w, anchor in spec:
             tree.heading(key, text=label)
             tree.column(key, width=w, anchor=anchor, stretch=False)
-        for q in quantities:
-            tree.heading(f"q{q:g}", text=f"@{q:g}")
-            tree.column(f"q{q:g}", width=90, anchor="e", stretch=False)
         vs = ttk.Scrollbar(holder, orient="vertical", command=tree.yview)
         hs = ttk.Scrollbar(holder, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
@@ -484,7 +523,7 @@ class QuoteTrackerApp:
                 if (s["lead_weeks"] is not None and g["best_lead"] is not None
                         and s["lead_weeks"] == g["best_lead"]):
                     lead = BEST + lead
-                vals = [s["material"] or "", lead,
+                vals = [s.get("quote_number") or "", s["material"] or "", lead,
                         "" if s["tooling"] is None else f"{s['tooling']:,.2f}",
                         "" if s["moq"] is None else f"{s['moq']:g}"]
                 for q in quantities:
@@ -497,6 +536,20 @@ class QuoteTrackerApp:
                 tree.insert(parent, "end", text=f"   {s['vendor'] or '—'}",
                             values=vals)
         self.study_tree = tree
+
+        # Only the supplier rows carry data; the part rows are intentionally
+        # blank, so judge emptiness from the children alone.
+        supplier_rows = [c for p in tree.get_children()
+                         for c in tree.get_children(p)]
+        empty = {key for key in cols
+                 if all(not str(tree.set(iid, key)).strip()
+                        for iid in supplier_rows)} if supplier_rows else set()
+        self._apply_visibility(tree, self.study_columns, empty,
+                               self.study_hidden_manual, self.study_shown_manual)
+        tree.bind("<Button-3>",
+                  lambda e: self._hide_clicked_column(
+                      e, tree, self.study_hidden_manual,
+                      self.study_shown_manual, self.refresh_study))
 
     def _expand_study(self, opened: bool):
         if self.study_tree is None:
@@ -541,7 +594,110 @@ class QuoteTrackerApp:
         holder.columnconfigure(0, weight=1)
         return tree
 
+    # ── column visibility ───────────────────────────────────────────────
+    @staticmethod
+    def _empty_columns(tree, keys) -> set:
+        """Keys whose every cell is blank across the rows currently loaded."""
+        children = tree.get_children()
+        empty = set()
+        for key in keys:
+            if all(not str(tree.set(iid, key)).strip() for iid in children):
+                empty.add(key)
+        return empty
+
+    @staticmethod
+    def _apply_visibility(tree, columns, auto_hidden: set,
+                          hidden_manual: set, shown_manual: set):
+        """Show every column except auto-empty ones, honouring user choices."""
+        hidden = (auto_hidden - shown_manual) | hidden_manual
+        visible = [k for k, _l, _w in columns if k not in hidden]
+        # Treeview needs at least one displayed column.
+        if not visible:
+            visible = [columns[0][0]]
+        tree["displaycolumns"] = visible
+
+    def _hide_clicked_column(self, event, tree, hidden_manual, shown_manual,
+                             refresh):
+        """Right-click a heading to hide that column."""
+        if tree.identify_region(event.x, event.y) != "heading":
+            return
+        col = tree.identify_column(event.x)     # '#3' -> display index
+        if not col:
+            return
+        idx = int(col[1:]) - 1
+        shown = list(tree["displaycolumns"])
+        if shown == ["#all"]:
+            shown = list(tree["columns"])
+        if 0 <= idx < len(shown):
+            key = shown[idx]
+            hidden_manual.add(key)
+            shown_manual.discard(key)
+            refresh()
+
+    def _choose_log_columns(self):
+        if not getattr(self, "log_columns", None):
+            return
+        self._open_chooser(self.log_columns, self.log_hidden_manual,
+                           self.log_shown_manual, self.refresh_log,
+                           "Quote Log columns")
+
+    def _choose_study_columns(self):
+        if not getattr(self, "study_columns", None):
+            return
+        self._open_chooser(self.study_columns, self.study_hidden_manual,
+                           self.study_shown_manual, self.refresh_study,
+                           "Study columns")
+
+    def _open_chooser(self, columns, hidden_manual, shown_manual, refresh,
+                      title):
+        current_hidden = {k for k, _l, _w in columns
+                          if k not in self._visible_keys(columns, hidden_manual,
+                                                         shown_manual)}
+
+        def on_apply(new_hidden: set):
+            hidden_manual.clear()
+            shown_manual.clear()
+            for key, _l, _w in columns:
+                if key in new_hidden:
+                    hidden_manual.add(key)
+                else:
+                    shown_manual.add(key)
+            refresh()
+
+        ColumnChooser(self.root, [(k, l) for k, l, _w in columns],
+                      current_hidden, on_apply, title=title)
+
+    def _visible_keys(self, columns, hidden_manual, shown_manual) -> set:
+        tree = (self.log_tree if columns is getattr(self, "log_columns", None)
+                else self.study_tree)
+        if tree is None:
+            return {k for k, _l, _w in columns}
+        shown = list(tree["displaycolumns"])
+        if shown == ["#all"]:
+            shown = [k for k, _l, _w in columns]
+        return set(shown)
+
     # ── row actions ─────────────────────────────────────────────────────
+    def _edit_line(self):
+        if not self.log_tree:
+            return
+        sel = self.log_tree.selection()
+        if not sel:
+            messagebox.showinfo("Edit line",
+                                "Select a line in the table first.")
+            return
+        line_id = int(sel[0])
+        line = self.db.get_line(line_id)
+        if line is None:
+            return
+
+        def on_save(values, breaks):
+            self.db.update_line(line_id, values, breaks)
+            self._log(f"✓ Updated line {values.get('part_number') or line_id}.")
+            self.refresh_all()
+
+        EditLineDialog(self.root, line, on_save)
+
     def _delete_line(self):
         if not self.log_tree:
             return
@@ -700,8 +856,8 @@ class QuoteTrackerApp:
         wb = Workbook()
         ws = wb.active
         ws.title = "Quote Log"
-        headers = (["Part #", "Supplier", "Description", "Material", "MOQ",
-                    "Lead Time", "Tooling", "Currency"] +
+        headers = (["Part #", "Supplier", "Quote #", "Description", "Material",
+                    "MOQ", "Lead Time", "Tooling", "Currency"] +
                    [f"@{q:g}" for q in quantities] + ["Notes", "File"])
         ws.append(headers)
         hf = Font(color="FFFFFF", bold=True)
@@ -710,15 +866,16 @@ class QuoteTrackerApp:
             cell.font = hf
             cell.fill = fill
         for r in rows:
-            row = [r["part_number"], r["vendor"], r["description"], r["material"],
-                   r["moq"], r["lead_time"], r["tooling"], r["currency"]]
+            row = [r["part_number"], r["vendor"], r["quote_number"],
+                   r["description"], r["material"], r["moq"], r["lead_time"],
+                   r["tooling"], r["currency"]]
             row += [r["breaks"].get(q) for q in quantities]
             row += [r["notes"], r["filename"]]
             ws.append(row)
         ws.freeze_panes = "A2"
 
         cmp_ws = wb.create_sheet("Study")
-        cmp_ws.append(["Part #", "Supplier", "Material"] +
+        cmp_ws.append(["Part #", "Supplier", "Quote #", "Material"] +
                       [f"@{q:g}" for q in quantities] +
                       ["Lead Time", "Lead (wks)", "Tooling", "MOQ"])
         for cell in cmp_ws[1]:
@@ -727,7 +884,8 @@ class QuoteTrackerApp:
         best_fill = PatternFill("solid", fgColor="C8E6C9")
         for g in self.db.study():
             for s in g["suppliers"]:
-                line = [g["part_number"], s["vendor"], s["material"]]
+                line = [g["part_number"], s["vendor"],
+                        s.get("quote_number") or "", s["material"]]
                 line += [s["breaks"].get(q) for q in quantities]
                 line += [s["lead_time"], s["lead_weeks"], s["tooling"], s["moq"]]
                 cmp_ws.append(line)
@@ -735,11 +893,11 @@ class QuoteTrackerApp:
                 for j, q in enumerate(quantities):
                     price = s["breaks"].get(q)
                     if price is not None and g["best_price"].get(q) == price:
-                        cmp_ws.cell(row=r_idx, column=4 + j).fill = best_fill
+                        cmp_ws.cell(row=r_idx, column=5 + j).fill = best_fill
                 if (s["lead_weeks"] is not None
                         and s["lead_weeks"] == g["best_lead"]):
                     cmp_ws.cell(row=r_idx,
-                                column=4 + len(quantities)).fill = best_fill
+                                column=5 + len(quantities)).fill = best_fill
         wb.save(path)
 
     # ── activity log ────────────────────────────────────────────────────

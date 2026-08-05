@@ -57,9 +57,19 @@ so it can live in a shared OneDrive folder. Back it up by copying that file.
   PDFs, where extraction is a best guess.
 - **Quote Log tab** — every quote line, all suppliers. Filter by **Part #**,
   **Supplier** and free-text **Search** (combine them; *Clear filters* resets).
-  One column per quantity break.
+  One column per quantity break, plus the supplier’s own **Quote #**.
+  - **Blank columns hide themselves.** A quantity column that no visible row
+    uses is hidden automatically, so the table stays tidy when quotes use
+    different quantity breaks.
+  - **Right-click a column heading to hide it**, or use **Columns…** to tick
+    exactly which columns to show (*Show all* brings everything back).
+  - **Edit line** (or double-click a row) opens an editor for every field —
+    part number, supplier, quote number, description, material, lead time,
+    MOQ, tooling, notes — and the **price breaks** themselves, so you can fix
+    anything that was mis-read or left blank after saving.
 - **Study tab** — the decision table. For each part it lists **every supplier**
-  side by side with material, lead time, tooling and price at each quantity.
+  side by side with quote number, material, lead time, tooling and price at each
+  quantity (empty columns hide themselves here too).
   A **★** marks the **lowest price at each quantity** and the **fastest
   delivery**, so you can weigh price against lead time (e.g. one supplier
   cheaper but slower, another pricier but faster). Filter by Part # / Supplier.
@@ -116,6 +126,7 @@ quote_tracker/
   main.py          entry point (creates the window)
   gui.py           main window: tabs, KPIs, tables, filters, export, DB menu
   review_dialog.py editable review grid shown before saving
+  edit_dialog.py   edit a saved line + the column show/hide chooser
   parsers.py       PDF / Excel / CSV extraction
   database.py      SQLite storage (flexible quantity model, originals, study)
   config.py        remembers the chosen database folder between runs
@@ -145,6 +156,10 @@ python -m tests.test_gui_smoke     # GUI construction (needs Tkinter/display)
 ---
 
 ## Version
+
+v2.2 — Blank columns hide themselves (with a Columns… chooser and
+right-click-to-hide), the supplier's quote number is captured and shown, and
+any saved line can be edited afterwards.
 
 v2.1 — Adds the Study comparison (price + delivery), Part #/Supplier filters,
 downloadable originals with 6-month retention, and a choosable/backupable

@@ -70,6 +70,7 @@ class QuoteDB:
                     filename    TEXT NOT NULL,
                     source_type TEXT,
                     vendor      TEXT,
+                    quote_number TEXT,
                     project     TEXT,
                     currency    TEXT,
                     file_hash   TEXT UNIQUE,
@@ -82,6 +83,7 @@ class QuoteDB:
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     file_id     INTEGER REFERENCES quote_files(id) ON DELETE CASCADE,
                     vendor      TEXT,
+                    quote_number TEXT,
                     project     TEXT,
                     part_number TEXT,
                     description TEXT,
@@ -118,6 +120,13 @@ class QuoteDB:
                 CREATE INDEX IF NOT EXISTS idx_breaks_qty   ON price_breaks(quantity);
                 """
             )
+            # Migrate databases created before quote_number existed.
+            for table in ("quote_files", "quote_lines"):
+                cols = {r["name"] for r in
+                        conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if "quote_number" not in cols:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN quote_number TEXT")
 
     # ── hashing / duplicate detection ───────────────────────────────────
     @staticmethod
@@ -147,20 +156,22 @@ class QuoteDB:
         with self._connect() as conn:
             cur = conn.execute(
                 """INSERT INTO quote_files
-                       (filename, source_type, vendor, project, currency,
-                        file_hash, line_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (filename, quote.source_type, quote.vendor, quote.project,
-                 quote.currency, file_hash, len(quote.lines)),
+                       (filename, source_type, vendor, quote_number, project,
+                        currency, file_hash, line_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (filename, quote.source_type, quote.vendor, quote.quote_number,
+                 quote.project, quote.currency, file_hash, len(quote.lines)),
             )
             file_id = cur.lastrowid
             for ln in quote.lines:
                 lcur = conn.execute(
                     """INSERT INTO quote_lines
-                           (file_id, vendor, project, part_number, description,
-                            material, moq, lead_time, tooling, currency, notes)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (file_id, ln.vendor or quote.vendor, quote.project,
+                           (file_id, vendor, quote_number, project, part_number,
+                            description, material, moq, lead_time, tooling,
+                            currency, notes)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (file_id, ln.vendor or quote.vendor,
+                     ln.quote_number or quote.quote_number, quote.project,
                      ln.part_number, ln.description, ln.material, ln.moq,
                      ln.lead_time, ln.tooling, quote.currency, ln.notes),
                 )
@@ -230,6 +241,47 @@ class QuoteDB:
         with self._connect() as conn:
             conn.execute("DELETE FROM quote_lines WHERE id = ?", (line_id,))
 
+    # Fields the edit dialog is allowed to change.
+    EDITABLE_FIELDS = ("part_number", "vendor", "quote_number", "description",
+                       "material", "moq", "lead_time", "tooling", "currency",
+                       "notes")
+
+    def update_line(self, line_id: int, values: Dict,
+                    breaks: Optional[Dict[float, float]] = None) -> None:
+        """Update a saved quote line, and optionally replace its price breaks.
+
+        ``breaks`` maps quantity -> unit price; passing it replaces the whole
+        set for that line (so an edit can add, change and remove breaks).
+        """
+        updates = {k: v for k, v in values.items() if k in self.EDITABLE_FIELDS}
+        with self._connect() as conn:
+            if updates:
+                clause = ", ".join(f"{k} = ?" for k in updates)
+                conn.execute(f"UPDATE quote_lines SET {clause} WHERE id = ?",
+                             list(updates.values()) + [line_id])
+            if breaks is not None:
+                conn.execute("DELETE FROM price_breaks WHERE line_id = ?",
+                             (line_id,))
+                conn.executemany(
+                    "INSERT INTO price_breaks (line_id, quantity, unit_price) "
+                    "VALUES (?, ?, ?)",
+                    [(line_id, q, p) for q, p in sorted(breaks.items())
+                     if q and p])
+
+    def get_line(self, line_id: int) -> Optional[Dict]:
+        """One saved line with its price breaks, for editing."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM quote_lines WHERE id = ?",
+                               (line_id,)).fetchone()
+            if row is None:
+                return None
+            data = dict(row)
+            brks = conn.execute(
+                "SELECT quantity, unit_price FROM price_breaks "
+                "WHERE line_id = ? ORDER BY quantity", (line_id,)).fetchall()
+        data["breaks"] = {b["quantity"]: b["unit_price"] for b in brks}
+        return data
+
     def update_line_notes(self, line_id: int, notes: str) -> None:
         with self._connect() as conn:
             conn.execute("UPDATE quote_lines SET notes = ? WHERE id = ?",
@@ -289,8 +341,9 @@ class QuoteDB:
                   part_number: str = "") -> List[Dict]:
         """Flat list of lines with their breaks folded into a dict."""
         sql = """
-            SELECT ql.id, ql.vendor, ql.part_number, ql.description, ql.material,
-                   ql.moq, ql.lead_time, ql.tooling, ql.currency, ql.notes,
+            SELECT ql.id, ql.vendor, ql.quote_number, ql.part_number,
+                   ql.description, ql.material, ql.moq, ql.lead_time,
+                   ql.tooling, ql.currency, ql.notes,
                    qf.filename, qf.loaded_at
             FROM quote_lines ql
             LEFT JOIN quote_files qf ON ql.file_id = qf.id
@@ -365,8 +418,9 @@ class QuoteDB:
         tradeoffs are visible at a glance.
         """
         sql = """
-            SELECT ql.id, ql.part_number, ql.description, ql.vendor, ql.material,
-                   ql.moq, ql.lead_time, ql.tooling
+            SELECT ql.id, ql.part_number, ql.description, ql.vendor,
+                   ql.quote_number, ql.material, ql.moq, ql.lead_time,
+                   ql.tooling
             FROM quote_lines ql
             WHERE 1=1
         """
