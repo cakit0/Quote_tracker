@@ -269,9 +269,12 @@ def _parse_long(data_rows, fields, default_vendor, warnings) -> List[QuoteLine]:
 # ── Vendor / currency inference from free text ──────────────────────────────
 
 def _infer_vendor(texts: Sequence[str], filename: str) -> str:
+    # Deliberately NOT matching "Company:" - on a supplier quote that line is
+    # usually the *customer's* company, which we must never store as the vendor.
     for t in texts:
         s = clean_str(t)
-        m = re.match(r"(?:vendor|supplier|from|company)\s*[:\-]\s*(.+)", s, re.I)
+        m = re.match(r"(?:vendor|supplier|sold\s*by|quoted\s*by)\s*[:\-]\s*(.+)",
+                     s, re.I)
         if m:
             return m.group(1).strip()[:80]
     # Fall back to the leading token of the filename.
@@ -346,64 +349,168 @@ def parse_csv(path: str) -> ParsedQuote:
     return quote
 
 
-# Text-mode fallback for PDFs with no ruled tables: find qty/price pairs.
-_TEXT_BREAK_RE = re.compile(
-    r"(?:qty|quantity|@)?\s*(\d[\d.,]*)\s*"
-    r"(?:pcs?|pieces?|units?|ea|off)?\s*[:\-]?\s*"
-    r"[\$€£]?\s*(\d[\d.,]*\d|\d)\b",
-    re.IGNORECASE,
-)
+# ── PDF text extraction (for quotes whose prices live in the text, not a
+#    ruled table - very common for machine-shop / manifold suppliers) ────────
 
+def _extract_price_block(lines: List[str]) -> List[PriceBreak]:
+    """Read a "Quantity | Price/Unit | Extended" style block from PDF text.
 
-def _parse_pdf_text(text: str, warnings: List[str]) -> List[QuoteLine]:
+    Anchors on a header line that mentions a quantity *and* a price word, then
+    reads the contiguous rows beneath it: first number on the row is the
+    quantity, the first currency amount is the unit price.  Quantities are read
+    straight from the document - never assumed.
+    """
+    header_i = None
+    for i, l in enumerate(lines):
+        ll = l.lower()
+        if (re.search(r"\b(qty|quantity)\b", ll)
+                and re.search(r"(price|cost|unit|rate|each|amount)", ll)):
+            header_i = i
+            break
+    if header_i is None:
+        return []
+
     breaks: List[PriceBreak] = []
-    for line in text.splitlines():
-        low = line.lower()
-        if not any(k in low for k in ("price", "qty", "quantity", "each", "unit", "$", "€", "£")):
+    for l in lines[header_i + 1:]:
+        m = re.match(r"\s*(\d[\d,]*)\b(.*)", l)
+        if not m:
+            if breaks:          # block has ended
+                break
             continue
-        for m in _TEXT_BREAK_RE.finditer(line):
+        qty = parse_number(m.group(1))
+        rest = m.group(2)
+        amounts = re.findall(r"[\$€£]\s*([\d,]+(?:\.\d+)?)", rest)
+        if not amounts:                                   # currency-less table
+            amounts = re.findall(r"(?<![\d.])([\d,]+\.\d{2})\b", rest)
+        if qty and qty > 0 and amounts:
+            price = parse_number(amounts[0])
+            if price and price > 0:
+                breaks.append(PriceBreak(quantity=qty, unit_price=price))
+        elif breaks:
+            break
+    return breaks
+
+
+def _extract_labeled_fields(text: str, lines: List[str]) -> dict:
+    """Pull part number / description / material / lead time / vendor hint from
+    the labelled header block of a single-part quote."""
+    out = {"part_number": "", "description": "", "material": "",
+           "lead_time": "", "vendor": ""}
+
+    # "<Supplier> Part Number : <value>" - the prefix is a strong vendor hint.
+    for m in re.finditer(
+            r"([A-Za-z][A-Za-z0-9&.\-/ ]{0,20}?)\s*part\s*"
+            r"(?:number|no\.?|num|#)\s*[:#]\s*([A-Za-z0-9][\w\-./]*)",
+            text, re.I):
+        prefix, value = m.group(1).strip(), m.group(2).strip()
+        if not value or prefix.lower() == "customer":
+            continue
+        out["part_number"] = value
+        if prefix and re.search(r"[A-Za-z]", prefix) and len(prefix) <= 15:
+            out["vendor"] = prefix
+        break
+
+    m = re.search(r"material\s*[:#]\s*(.+)", text, re.I)
+    if m:
+        out["material"] = m.group(1).strip()
+
+    m = re.search(r"(?:delivery\s*date|lead\s*time|delivery|lead)\s*[:#]\s*(.+)",
+                  text, re.I)
+    if m:
+        out["lead_time"] = m.group(1).strip()
+
+    # Description: prefer the clean line under a "Comments" heading, else the
+    # "Description:" field (trimmed of a trailing "Rev." fragment).
+    try:
+        ci = next(i for i, l in enumerate(lines)
+                  if l.strip().lower() == "comments")
+        for l2 in lines[ci + 1:ci + 4]:
+            s = l2.strip()
+            if s and not re.match(r"(material|size|note|clear|o-ring)", s, re.I):
+                out["description"] = s
+                break
+    except StopIteration:
+        pass
+    if not out["description"]:
+        m = re.search(r"description\s*[:#]\s*(.+)", text, re.I)
+        if m:
+            out["description"] = re.split(r"\s+rev\.?\s*[:#]", m.group(1),
+                                          flags=re.I)[0].strip()
+    return out
+
+
+def _scan_price_pairs(lines: List[str], warnings: List[str]) -> List[QuoteLine]:
+    """Last-resort: find "<qty> $<price>" pairs anywhere in the text.
+
+    Requires a currency symbol immediately before the price so that prose like
+    "shipping in 5 weeks" is never mistaken for a price break.
+    """
+    dedup: dict = {}
+    pair = re.compile(r"(?:qty|quantity|@)?\s*([\d,]+)\s*"
+                      r"(?:pcs?|pieces?|units?|ea|off)?\s*"
+                      r"[\$€£]\s*([\d,]+(?:\.\d+)?)", re.I)
+    for l in lines:
+        for m in pair.finditer(l):
             qty = parse_number(m.group(1))
             price = parse_number(m.group(2))
             if qty and price and qty > 0 and price > 0 and qty != price:
-                breaks.append(PriceBreak(quantity=qty, unit_price=price))
-    # De-duplicate on quantity, keep the lowest price seen.
-    dedup: dict = {}
-    for b in breaks:
-        if b.quantity not in dedup or b.unit_price < dedup[b.quantity]:
-            dedup[b.quantity] = b.unit_price
+                if qty not in dedup or price < dedup[qty]:
+                    dedup[qty] = price
     if not dedup:
         return []
-    warnings.append("PDF had no ruled table; extracted price breaks from text "
-                    "(please double-check).")
-    line = QuoteLine(part_number="(quote)",
-                     breaks=[PriceBreak(q, p) for q, p in sorted(dedup.items())])
-    return [line]
+    warnings.append("Extracted price breaks from text - please verify them.")
+    return [QuoteLine(part_number="(quote)",
+                      breaks=[PriceBreak(q, p) for q, p in sorted(dedup.items())])]
 
 
 def parse_pdf(path: str) -> ParsedQuote:
     import pdfplumber
 
     quote = ParsedQuote(source_type="pdf", project=Path(path).stem)
-    all_lines: List[QuoteLine] = []
+    table_lines: List[QuoteLine] = []
     full_text_parts: List[str] = []
     try:
         with pdfplumber.open(path) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text() or ""
-                full_text_parts.append(page_text)
+                full_text_parts.append(page.extract_text() or "")
                 for table in page.extract_tables() or []:
                     rows = [[clean_str(c) for c in row] for row in table if row]
-                    all_lines.extend(_rows_to_lines(rows, quote.warnings))
+                    # Only treat genuinely tabular blocks as data; page-layout
+                    # tables (1-2 wide) are ignored so they don't add noise.
+                    if len(rows) >= 2 and max((len(r) for r in rows), default=0) >= 3:
+                        # Discard exploratory warnings - a page-layout table that
+                        # isn't a price table shouldn't produce a user warning.
+                        table_lines.extend(_rows_to_lines(rows, []))
     except Exception as exc:  # noqa: BLE001
         quote.warnings.append(f"Could not read PDF: {exc}")
         return quote
 
     full_text = "\n".join(full_text_parts)
-    if not all_lines:
-        all_lines = _parse_pdf_text(full_text, quote.warnings)
+    lines = full_text.splitlines()
 
-    header_lines = full_text.splitlines()[:12]
-    quote.vendor = _infer_vendor(header_lines, path)
+    if table_lines:
+        # Multi-part tabular PDF.
+        all_lines = table_lines
+        quote.vendor = _infer_vendor(lines[:12], path)
+    else:
+        # Single-part quote: labelled fields + a text price block.
+        fields = _extract_labeled_fields(full_text, lines)
+        breaks = _extract_price_block(lines)
+        if breaks:
+            quote.vendor = fields["vendor"]
+            all_lines = [QuoteLine(
+                part_number=fields["part_number"] or "(quote)",
+                description=fields["description"],
+                material=fields["material"],
+                lead_time=fields["lead_time"],
+                vendor=fields["vendor"],
+                breaks=breaks,
+            )]
+        else:
+            all_lines = _scan_price_pairs(lines, quote.warnings)
+            if all_lines and not quote.vendor:
+                quote.vendor = fields["vendor"]
+
     quote.currency = _infer_currency([full_text])
     for ln in all_lines:
         if not ln.vendor:

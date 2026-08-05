@@ -138,9 +138,31 @@ def test_parsers_and_db():
     check("Global" in best_vendor, f"best vendor is Global Parts (got {best_vendor!r})")
 
 
+def test_real_quote_optional():
+    """Regression test against a real supplier PDF (M&W quote 54446).
+
+    The PDF is intentionally NOT committed (it contains a supplier's confidential
+    pricing), so this test is skipped when the file is absent.
+    """
+    path = os.path.join(SAMPLES, "real_q54446.pdf")
+    print("\n[real supplier PDF]")
+    if not os.path.exists(path):
+        print("  SKIP  real_q54446.pdf not present")
+        return
+    q = parse_file(path)
+    breaks = {b.quantity: b.unit_price for ln in q.lines for b in ln.breaks}
+    check(q.vendor == "M&W", f"vendor is the supplier M&W (got {q.vendor!r})")
+    check(len(q.lines) == 1 and q.lines[0].part_number == "26-1114",
+          "part number 26-1114 extracted")
+    check(breaks == {1: 837.24, 50: 148.67, 100: 135.66, 500: 129.51},
+          f"quantity breaks 1/50/100/500 read from text (got {breaks})")
+    check(not q.warnings, f"no parse warnings (got {q.warnings})")
+
+
 if __name__ == "__main__":
     test_number_parser()
     test_parsers_and_db()
+    test_real_quote_optional()
     print("\n" + "=" * 50)
     if failures:
         print(f"{len(failures)} FAILURE(S)")

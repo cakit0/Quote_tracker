@@ -28,6 +28,14 @@ everything so you can compare suppliers side by side.
 3. Copy that `.exe` anywhere (e.g. your OneDrive Quoting folder) and
    double-click it. No Python required on that machine.
 
+### Option C — download a pre-built `.exe` (no Python at all)
+A GitHub Actions workflow (`.github/workflows/build-windows-exe.yml`) builds the
+Windows `.exe` on every push. To download it:
+1. Open the repo’s **Actions** tab → the latest **Build Windows EXE** run.
+2. Under **Artifacts**, download **`QuoteTracker-windows`** (a zip containing
+   `QuoteTracker.exe`).
+3. Unzip and double-click `QuoteTracker.exe`.
+
 Either way, the database file **`hawe_quotes.db`** is created **next to the app**
 so it can live in a shared OneDrive folder. Back it up by copying that file.
 
