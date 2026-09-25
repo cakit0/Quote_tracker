@@ -16,7 +16,8 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from quote_tracker.parsers import parse_file, parse_number   # noqa: E402
-from quote_tracker.database import QuoteDB                    # noqa: E402
+from quote_tracker.database import (QuoteDB, ORIGINAL_RETENTION_DAYS,  # noqa: E402
+                                    lead_time_weeks)
 
 SAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "samples")
 os.makedirs(SAMPLES, exist_ok=True)
@@ -193,11 +194,58 @@ def test_real_quotes_supplier_and_part():
               f"{fname}: customer not used as supplier")
 
 
+def test_multi_item_quote():
+    """A quote with several items must become one row per item."""
+    print("\n[multi-item quote]")
+    path = os.path.join(SAMPLES, "real_6354.pdf")
+    if not os.path.exists(path):
+        print("  SKIP  real_6354.pdf not present")
+        return
+    q = parse_file(path)
+    check(len(q.lines) == 2, f"2 items parsed (got {len(q.lines)})")
+    check(all(l.part_number == "EC-000098-US" for l in q.lines),
+          "both items carry part EC-000098-US")
+    mats = sorted(l.material.upper() for l in q.lines)
+    check(mats == ["6061 ALUMINUM", "DUCTILE IRON"],
+          f"materials distinguish the items (got {mats})")
+    first = {int(b.quantity): b.unit_price for b in q.lines[0].breaks}
+    second = {int(b.quantity): b.unit_price for b in q.lines[1].breaks}
+    check(first == {1: 246.44, 300: 71.12, 1000: 68.25, 3000: 65.31},
+          f"item 1 breaks (got {first})")
+    check(second == {1: 266.76, 300: 80.12, 1000: 73.38, 3000: 69.50},
+          f"item 2 breaks (got {second})")
+    check(q.quote_number == "6354", f"quote number 6354 (got {q.quote_number!r})")
+
+
+def test_duplicate_flag_and_retention():
+    print("\n[duplicate flag + retention]")
+    check(ORIGINAL_RETENTION_DAYS == 365, "originals are kept for 12 months")
+
+    tmp = tempfile.mkdtemp()
+    db = QuoteDB(os.path.join(tmp, "dup.db"))
+    q = parse_file(os.path.join(SAMPLES, "vendor_A_wide.xlsx"))
+    db.save_quote(q, "vendor_A_wide.xlsx", file_hash="a")
+
+    part = q.lines[0].part_number
+    vendor = q.lines[0].vendor
+    hit = db.find_duplicates([(part, vendor)])
+    check(bool(hit), f"same part+vendor is flagged ({part} / {vendor})")
+    check(not db.find_duplicates([(part, "Some Other Supplier")]),
+          "same part from a different supplier is not flagged")
+    check(not db.find_duplicates([("NO-SUCH-PART", vendor)]),
+          "unknown part is not flagged")
+
+    rows = db.quote_log()
+    check(rows and rows[0]["created_at"], "lines record an 'added' timestamp")
+
+
 if __name__ == "__main__":
     test_number_parser()
     test_parsers_and_db()
     test_real_quote_optional()
     test_real_quotes_supplier_and_part()
+    test_multi_item_quote()
+    test_duplicate_flag_and_retention()
     print("\n" + "=" * 50)
     if failures:
         print(f"{len(failures)} FAILURE(S)")

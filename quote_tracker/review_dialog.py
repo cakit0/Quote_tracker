@@ -27,11 +27,15 @@ _FIXED_COLS = [
 
 
 class ReviewDialog(tk.Toplevel):
-    def __init__(self, master, quote: ParsedQuote, filename: str, on_save):
+    def __init__(self, master, quote: ParsedQuote, filename: str, on_save,
+                 duplicate_check=None):
         super().__init__(master)
         self.quote = quote
         self.filename = filename
         self.on_save = on_save
+        # Callable((part, vendor) pairs) -> dict of existing matches; lets the
+        # dialog warn when this part was already quoted by this supplier.
+        self.duplicate_check = duplicate_check
         self.result_saved = False
 
         # Mutable working copy of the quantity columns.
@@ -48,6 +52,7 @@ class ReviewDialog(tk.Toplevel):
         self._build_grid()
         self._build_buttons()
         self._load_rows()
+        self._refresh_duplicates()
 
         self.bind("<Escape>", lambda e: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
@@ -71,9 +76,9 @@ class ReviewDialog(tk.Toplevel):
         ttk.Entry(top, textvariable=self.vendor_var, width=28).grid(
             row=2, column=1, sticky="w", padx=(6, 18))
 
-        ttk.Label(top, text="Project").grid(row=2, column=2, sticky="w")
-        self.project_var = tk.StringVar(value=self.quote.project)
-        ttk.Entry(top, textvariable=self.project_var, width=24).grid(
+        ttk.Label(top, text="Quote #").grid(row=2, column=2, sticky="w")
+        self.quote_no_var = tk.StringVar(value=self.quote.quote_number)
+        ttk.Entry(top, textvariable=self.quote_no_var, width=18).grid(
             row=2, column=3, sticky="w", padx=(6, 18))
 
         ttk.Label(top, text="Currency").grid(row=2, column=4, sticky="w")
@@ -81,12 +86,24 @@ class ReviewDialog(tk.Toplevel):
         ttk.Entry(top, textvariable=self.currency_var, width=8).grid(
             row=2, column=5, sticky="w", padx=(6, 0))
 
+        ttk.Label(top, text="Project").grid(row=3, column=0, sticky="w",
+                                            pady=(6, 0))
+        self.project_var = tk.StringVar(value=self.quote.project)
+        ttk.Entry(top, textvariable=self.project_var, width=28).grid(
+            row=3, column=1, sticky="w", padx=(6, 18), pady=(6, 0))
+
+        self.dup_lbl = ttk.Label(top, text="", style="Muted.TLabel",
+                                 foreground=theme.RED, wraplength=900,
+                                 justify="left")
+        self.dup_lbl.grid(row=4, column=0, columnspan=6, sticky="w",
+                          pady=(8, 0))
+
         if self.quote.warnings:
             warn = ttk.Label(
                 top, text="⚠  " + "  |  ".join(self.quote.warnings),
                 style="Muted.TLabel", foreground=theme.RED, wraplength=900,
                 justify="left")
-            warn.grid(row=3, column=0, columnspan=6, sticky="w", pady=(10, 0))
+            warn.grid(row=5, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
     def _column_ids(self):
         return ([c[0] for c in _FIXED_COLS] +
@@ -149,6 +166,34 @@ class ReviewDialog(tk.Toplevel):
             p = ln.price_at(q)
             vals.append("" if p is None else f"{p:g}")
         return vals
+
+    def _refresh_duplicates(self) -> dict:
+        """Flag rows whose part + supplier are already in the database."""
+        if self.duplicate_check is None:
+            return {}
+        vendor = self.vendor_var.get().strip()
+        pairs = []
+        for iid in self.tree.get_children():
+            part = str(self.tree.set(iid, "part_number")).strip()
+            if part:
+                pairs.append((part, vendor))
+        if not pairs:
+            self.dup_lbl.config(text="")
+            return {}
+        try:
+            dups = self.duplicate_check(pairs) or {}
+        except Exception:   # noqa: BLE001 - a flag is never worth failing over
+            return {}
+        if dups:
+            parts = sorted({d["part_number"] for d in dups.values()})
+            shown = ", ".join(parts[:4]) + ("…" if len(parts) > 4 else "")
+            self.dup_lbl.config(
+                text=f"⚠  Already in the database from {vendor or 'this supplier'}: "
+                     f"{shown}. Saving adds another quote for the same part — "
+                     f"fine for a re-quote, but check you're not loading a duplicate.")
+        else:
+            self.dup_lbl.config(text="")
+        return dups
 
     def _load_rows(self):
         for iid in self.tree.get_children():
@@ -256,11 +301,13 @@ class ReviewDialog(tk.Toplevel):
                 moq=parse_number(data.get("moq")),
                 lead_time=(data.get("lead_time") or "").strip(),
                 vendor=self.vendor_var.get().strip(),
+                quote_number=self.quote_no_var.get().strip(),
                 breaks=breaks,
             ))
         return ParsedQuote(
             source_type=self.quote.source_type,
             vendor=self.vendor_var.get().strip(),
+            quote_number=self.quote_no_var.get().strip(),
             project=self.project_var.get().strip(),
             currency=self.currency_var.get().strip(),
             lines=lines,
@@ -282,6 +329,18 @@ class ReviewDialog(tk.Toplevel):
                     "None of the lines have a price break. Save anyway?",
                     parent=self):
                 return
+        dups = self._refresh_duplicates()
+        if dups:
+            parts = sorted({d["part_number"] for d in dups.values()})
+            if not messagebox.askyesno(
+                    "Already quoted",
+                    f"{', '.join(parts[:6])}\n\nalready exist(s) in the database "
+                    f"from {quote.vendor or 'this supplier'}.\n\n"
+                    "Save this quote as well? (Yes keeps both, so you can "
+                    "compare the old and new price.)",
+                    parent=self):
+                return
+
         self.result_saved = True
         self.on_save(quote)
         self.destroy()

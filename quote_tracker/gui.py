@@ -25,7 +25,7 @@ from tkinter import ttk, filedialog, messagebox
 from typing import List
 
 from . import theme, config
-from .database import QuoteDB, ORIGINAL_RETENTION_DAYS
+from .database import QuoteDB, ORIGINAL_RETENTION_DAYS, RETENTION_LABEL
 from .parsers import parse_file, SUPPORTED_EXTENSIONS
 from .review_dialog import ReviewDialog
 from .edit_dialog import EditLineDialog, ColumnChooser
@@ -102,7 +102,7 @@ class QuoteTrackerApp:
                                os.path.abspath(self.db_path))))
         dbmenu.add_separator()
         dbmenu.add_command(
-            label=f"Purge originals older than 6 months",
+            label=f"Purge originals older than {RETENTION_LABEL}",
             command=self._purge_now)
         menubar.add_cascade(label="Database", menu=dbmenu)
 
@@ -293,8 +293,8 @@ class QuoteTrackerApp:
         self.nb.add(tab, text="  Files  ")
         bar = ttk.Frame(tab)
         bar.pack(fill="x", pady=(0, 10))
-        ttk.Label(bar, text=f"Original files are kept for re-download and "
-                            f"auto-removed after 6 months.",
+        ttk.Label(bar, text="Original files are kept for re-download and "
+                            f"auto-removed after {RETENTION_LABEL}.",
                   style="Muted.TLabel").pack(side="left")
         ttk.Button(bar, text="Remove file", style="Ghost.TButton",
                    command=self._delete_file).pack(side="right")
@@ -392,7 +392,8 @@ class QuoteTrackerApp:
             self._log(f"✓ Saved {name}: {len(edited.lines)} line(s) "
                       f"(supplier: {edited.vendor or 'n/a'}).")
             self.refresh_all()
-        ReviewDialog(self.root, quote, name, on_save)
+        ReviewDialog(self.root, quote, name, on_save,
+                     duplicate_check=self.db.find_duplicates)
 
     # ── refresh ─────────────────────────────────────────────────────────
     def refresh_all(self):
@@ -444,7 +445,7 @@ class QuoteTrackerApp:
         base = [("part_number", "Part #", 130), ("vendor", "Supplier", 150),
                 ("quote_number", "Quote #", 100),
                 ("description", "Description", 180), ("material", "Material", 100),
-                ("lead_time", "Lead Time", 90)]
+                ("lead_time", "Lead Time", 90), ("added", "Added", 90)]
         qcols = [(f"q{q:g}", f"@{q:g}", 80) for q in quantities]
         columns = base + qcols
         self.log_columns = columns
@@ -455,7 +456,7 @@ class QuoteTrackerApp:
         for r in rows:
             vals = [r["part_number"], r["vendor"] or "", r["quote_number"] or "",
                     r["description"] or "", r["material"] or "",
-                    r["lead_time"] or ""]
+                    r["lead_time"] or "", (r["created_at"] or "")[:10]]
             for q in quantities:
                 p = r["breaks"].get(q)
                 vals.append("" if p is None else f"{p:,.2f}")
@@ -814,7 +815,7 @@ class QuoteTrackerApp:
         self.refresh_files()
         messagebox.showinfo(
             "Purge complete",
-            f"Removed {n} original file(s) older than 6 months.\n"
+            f"Removed {n} original file(s) older than {RETENTION_LABEL}.\n"
             "The quote data itself is always kept.")
 
     def _about(self):
@@ -825,7 +826,8 @@ class QuoteTrackerApp:
             "• Review the extracted data before it is saved.\n"
             "• Study tab compares suppliers per part on price AND delivery.\n"
             "• Original files are stored for re-download and auto-removed after "
-            f"6 months (~{ORIGINAL_RETENTION_DAYS} days).\n"
+            f"{RETENTION_LABEL} (~{ORIGINAL_RETENTION_DAYS} days). Quote data "
+            "itself is kept indefinitely.\n"
             "• Use the Database menu to choose the database folder or back it up.")
 
     # ── excel export ────────────────────────────────────────────────────
@@ -858,7 +860,7 @@ class QuoteTrackerApp:
         ws.title = "Quote Log"
         headers = (["Part #", "Supplier", "Quote #", "Description", "Material",
                     "MOQ", "Lead Time", "Tooling", "Currency"] +
-                   [f"@{q:g}" for q in quantities] + ["Notes", "File"])
+                   [f"@{q:g}" for q in quantities] + ["Added", "Notes", "File"])
         ws.append(headers)
         hf = Font(color="FFFFFF", bold=True)
         fill = PatternFill("solid", fgColor="1A1A1A")
@@ -870,7 +872,7 @@ class QuoteTrackerApp:
                    r["description"], r["material"], r["moq"], r["lead_time"],
                    r["tooling"], r["currency"]]
             row += [r["breaks"].get(q) for q in quantities]
-            row += [r["notes"], r["filename"]]
+            row += [(r["created_at"] or "")[:10], r["notes"], r["filename"]]
             ws.append(row)
         ws.freeze_panes = "A2"
 

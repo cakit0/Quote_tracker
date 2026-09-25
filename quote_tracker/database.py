@@ -24,7 +24,10 @@ from typing import Dict, List, Optional, Tuple
 from .models import ParsedQuote, QuoteLine
 
 # How long original quote files are kept before being purged from the database.
-ORIGINAL_RETENTION_DAYS = 183   # ~6 months
+# Quote data (the parsed lines) is never deleted - only the re-downloadable
+# copy of the source file ages out.
+ORIGINAL_RETENTION_DAYS = 365   # 12 months
+RETENTION_LABEL = "12 months"
 
 
 def lead_time_weeks(text: str) -> Optional[float]:
@@ -282,6 +285,34 @@ class QuoteDB:
         data["breaks"] = {b["quantity"]: b["unit_price"] for b in brks}
         return data
 
+    def find_duplicates(self, pairs) -> Dict:
+        """Which (part_number, vendor) pairs are already in the database.
+
+        Used to flag a re-quote at import time: the same part from the same
+        supplier usually means a newer price, which the user may want to
+        compare against - or may have loaded by mistake.  Returns
+        {(part_lower, vendor_lower): {...existing row info...}}.
+        """
+        found: Dict = {}
+        with self._connect() as conn:
+            for part, vendor in pairs:
+                if not part:
+                    continue
+                row = conn.execute(
+                    """SELECT ql.part_number, ql.vendor, ql.quote_number,
+                              ql.created_at, COUNT(*) AS n
+                       FROM quote_lines ql
+                       WHERE LOWER(TRIM(ql.part_number)) = LOWER(TRIM(?))
+                         AND LOWER(TRIM(COALESCE(ql.vendor,''))) = LOWER(TRIM(?))
+                       GROUP BY ql.part_number, ql.vendor
+                       ORDER BY ql.created_at DESC""",
+                    (part, vendor or ""),
+                ).fetchone()
+                if row and row["n"]:
+                    found[(part.strip().lower(),
+                           (vendor or "").strip().lower())] = dict(row)
+        return found
+
     def update_line_notes(self, line_id: int, notes: str) -> None:
         with self._connect() as conn:
             conn.execute("UPDATE quote_lines SET notes = ? WHERE id = ?",
@@ -343,7 +374,7 @@ class QuoteDB:
         sql = """
             SELECT ql.id, ql.vendor, ql.quote_number, ql.part_number,
                    ql.description, ql.material, ql.moq, ql.lead_time,
-                   ql.tooling, ql.currency, ql.notes,
+                   ql.tooling, ql.currency, ql.notes, ql.created_at,
                    qf.filename, qf.loaded_at
             FROM quote_lines ql
             LEFT JOIN quote_files qf ON ql.file_id = qf.id

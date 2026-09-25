@@ -469,6 +469,17 @@ def _website_domain(text: str) -> str:
     return ""
 
 
+def _clean_company_line(line: str) -> str:
+    """Tidy a company line: drop a leading label and trailing punctuation.
+
+    "Vendor: Rapid Tooling Inc" -> "Rapid Tooling Inc"
+    """
+    s = line.strip()
+    s = re.sub(r"^\s*(?:vendor|supplier|sold\s*by|quoted\s*by|from)\s*[:\-]\s*",
+               "", s, flags=re.I)
+    return s.strip().rstrip(",").strip()
+
+
 def _extract_supplier(lines: List[str], text: str, part_prefix: str = "") -> str:
     """Best-effort supplier name.
 
@@ -480,7 +491,7 @@ def _extract_supplier(lines: List[str], text: str, part_prefix: str = "") -> str
     """
     for l in lines[:8]:
         if _looks_like_company(l):
-            return l.strip().rstrip(",").strip()
+            return _clean_company_line(l)
     if part_prefix:
         return part_prefix
     dom = _website_domain(text)
@@ -488,7 +499,7 @@ def _extract_supplier(lines: List[str], text: str, part_prefix: str = "") -> str
         return dom[:1].upper() + dom[1:]
     for l in lines:
         if _looks_like_company(l):
-            return l.strip().rstrip(",").strip()
+            return _clean_company_line(l)
     return ""
 
 
@@ -507,6 +518,77 @@ def _extract_part_numbers(text: str) -> List[str]:
         if not re.match(r"^\d{1,2}-\d{1,2}$", val):   # not a tiny range like 7-8
             return [val]
     return []
+
+
+_MATERIAL_SNIFF = re.compile(
+    r"((?:\d{4}(?:-[A-Z0-9]+)?\s+)?(?:ductile\s+iron|cast\s+iron|stainless(?:\s+steel)?|"
+    r"alumini?um|steel|brass|bronze|nylon|delrin)"
+    r"(?:\s+\d{2}-\d{2}-\d{2})?)", re.I)
+
+
+def _sniff_material(text: str) -> str:
+    """Pull a material out of free-text description, e.g. '6061 ALUMINUM'."""
+    m = _MATERIAL_SNIFF.search(text or "")
+    return re.sub(r"\s+", " ", m.group(1)).strip(" ,.") if m else ""
+
+
+def _extract_item_table(lines: List[str]) -> List[dict]:
+    """Parse an "Item | Description | Quantity | Price" table.
+
+    Some suppliers put several items on one quote, each with its own price
+    breaks, like::
+
+        Item Description Revision Quantity Price
+        1 EC-000098-US 1 $246.440 EA
+        ML FEED CARTRIDGE MANIFOLD, 6061
+        ALUMINUM, NO COATING.
+        300 $71.120 EA
+        2 EC-000098-US 1 $266.760 EA        <- next item
+        ...
+
+    An item row carries an item number, a label and a first price; the rows
+    under it are extra quantity breaks; anything else is description text.
+    Returns one dict per item: label, description, breaks.
+    """
+    header_i = None
+    for i, l in enumerate(lines):
+        low = l.lower()
+        if ("item" in low and re.search(r"\b(qty|quantity)\b", low)
+                and re.search(r"price|cost", low)):
+            header_i = i
+            break
+    if header_i is None:
+        return []
+
+    item_re = re.compile(r"^\s*(\d{1,3})\s+(.+?)\s+([\d,]+)\s+[\$€£]\s*([\d,]+(?:\.\d+)?)")
+    break_re = re.compile(r"^\s*([\d,]+)\s+[\$€£]\s*([\d,]+(?:\.\d+)?)")
+    stop_re = re.compile(r"^\s*(by\b|page\b|report\s+generated|thank you|"
+                         r"terms\b|total\b|subtotal)", re.I)
+
+    items: List[dict] = []
+    for l in lines[header_i + 1:]:
+        s = l.strip()
+        if not s:
+            continue
+        if stop_re.match(s):
+            if items:
+                break
+            continue
+        m = item_re.match(l)
+        if m:
+            qty, price = parse_number(m.group(3)), parse_number(m.group(4))
+            items.append({"label": m.group(2).strip(), "description": "",
+                          "breaks": {qty: price} if qty and price else {}})
+            continue
+        m = break_re.match(l)
+        if m and items:
+            qty, price = parse_number(m.group(1)), parse_number(m.group(2))
+            if qty and price and qty > 0 and price > 0:
+                items[-1]["breaks"][qty] = price
+            continue
+        if items and re.search(r"[A-Za-z]", s):
+            items[-1]["description"] = (items[-1]["description"] + " " + s).strip()
+    return items
 
 
 def _extract_quote_number(text: str, path: str = "") -> str:
@@ -708,6 +790,39 @@ def parse_pdf(path: str) -> ParsedQuote:
         # Single-part quote: supplier + part number(s) + a text price block.
         quote.vendor = supplier
         part_numbers = _extract_part_numbers(full_text)
+
+        # An "Item | Description | Quantity | Price" table can hold several
+        # items, each with its own breaks - handle that before the
+        # one-part-per-quote path.
+        items = _extract_item_table(lines)
+        if items and (len(items) > 1 or items[0]["breaks"]):
+            all_lines = []
+            for it in items:
+                label = it["label"]
+                m = _HAWE_PART_RE.search(label)
+                part = (m.group(0) if m else
+                        (part_numbers[0] if part_numbers else label))
+                desc = it["description"] or (label if part != label else "")
+                all_lines.append(QuoteLine(
+                    part_number=part or "(quote)",
+                    description=desc.strip(),
+                    material=_sniff_material(f"{label} {desc}") or fields["material"],
+                    lead_time=fields["lead_time"],
+                    vendor=supplier,
+                    quote_number=quote.quote_number,
+                    breaks=[PriceBreak(q, p)
+                            for q, p in sorted(it["breaks"].items())],
+                ))
+            if len(all_lines) > 1:
+                quote.warnings.append(
+                    f"This quote has {len(all_lines)} items — each is a "
+                    "separate row below. Check the material/description on each.")
+            for ln in all_lines:
+                if not ln.vendor:
+                    ln.vendor = quote.vendor
+            quote.lines = all_lines
+            return quote
+
         breaks = _extract_price_block(lines)
         if not breaks:
             scan = _scan_price_pairs(lines, [])

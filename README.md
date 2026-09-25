@@ -88,13 +88,20 @@ so it can live in a shared OneDrive folder. Back it up by copying that file.
 ## Using it
 
 - **Import tab** — drag files onto the drop zone (or click *Browse files…*).
-  Each file opens a **Review** window showing what was extracted. Fix anything
-  that’s wrong (double-click a cell to edit), set the supplier name, then
-  **Save to database**. Nothing is stored until you confirm — important for
-  PDFs, where extraction is a best guess.
+  Each file opens a **Review** window showing what was extracted — supplier,
+  the supplier’s own **Quote #**, and one row per item. Fix anything that’s
+  wrong (double-click a cell to edit), then **Save to database**. Nothing is
+  stored until you confirm — important for PDFs, where extraction is a guess.
+  - **Multi-item quotes** are split into one row per item, each with its own
+    material and price breaks (e.g. the same part in aluminium and in ductile
+    iron).
+  - **Re-quote flag:** if a part is already in the database from the same
+    supplier, the dialog says so and asks you to confirm before saving — so a
+    genuine re-quote is kept, but an accidental duplicate is caught.
 - **Quote Log tab** — every quote line, all suppliers. Filter by **Part #**,
   **Supplier** and free-text **Search** (combine them; *Clear filters* resets).
-  One column per quantity break, plus the supplier’s own **Quote #**.
+  One column per quantity break, plus the supplier’s own **Quote #** and the
+  **Added** date each line was recorded.
   - **Blank columns hide themselves.** A quantity column that no visible row
     uses is hidden automatically, so the table stays tidy when quotes use
     different quantity breaks.
@@ -112,11 +119,12 @@ so it can live in a shared OneDrive folder. Back it up by copying that file.
   cheaper but slower, another pricier but faster). Filter by Part # / Supplier.
 - **Files tab** — the files you’ve loaded. **Download original** or **Open
   original** re-opens the exact file you imported. Originals are kept for
-  re-download and **auto-removed after 6 months** (the quote data itself is
-  always kept). Remove a file to remove its lines.
+  re-download and **auto-removed after 12 months**; the quote data itself
+  (parts, prices, suppliers) is **kept indefinitely**. Remove a file to remove
+  its lines.
 - **Database menu** — **Set database folder…** (move the `.db` to any folder,
   e.g. OneDrive), **Back up database now…** (timestamped copy), **Open database
-  folder**, and a manual **purge** of originals older than 6 months.
+  folder**, and a manual **purge** of originals older than 12 months.
 - **Export to Excel** — writes a two-sheet workbook: full **Quote Log** and a
   **Study** sheet with best price / fastest delivery highlighted in green.
 
@@ -193,6 +201,10 @@ python -m tests.test_gui_smoke     # GUI construction (needs Tkinter/display)
 ---
 
 ## Version
+
+v2.3 — Multi-item quotes (one row per item, with its own material and prices),
+an **Added** date, the supplier quote number shown at import, a re-quote flag
+when the same part+supplier is already stored, and 12-month file retention.
 
 v2.2 — Blank columns hide themselves (with a Columns… chooser and
 right-click-to-hide), the supplier's quote number is captured and shown, and

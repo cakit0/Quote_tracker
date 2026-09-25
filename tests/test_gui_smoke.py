@@ -37,11 +37,15 @@ def main():
     tmp = tempfile.mkdtemp()
     db_path = os.path.join(tmp, "smoke.db")
 
-    # Pre-load two files directly so the window opens with data.
+    # Pre-load two files directly so the window opens with data.  The first is
+    # stored with its original bytes so the download/retention checks below
+    # don't depend on the optional (git-ignored) sample sheets.
     db = QuoteDB(db_path)
     for fn in ("vendor_A_wide.xlsx", "vendor_B_long.csv"):
-        q = parse_file(os.path.join(SAMPLES, fn))
-        db.save_quote(q, fn)
+        path = os.path.join(SAMPLES, fn)
+        q = parse_file(path)
+        with open(path, "rb") as fh:
+            db.save_quote(q, fn, file_hash=fn, original_bytes=fh.read())
 
     root = tk.Tk()
     root.withdraw()   # don't actually map the window
